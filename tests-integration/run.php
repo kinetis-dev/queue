@@ -113,7 +113,14 @@ function runSqlQueueVisibilityTimeoutChecks(MysqlConnectionPool $mysql): void
 
     $mysql->execute('DELETE FROM kinetis_queue_jobs');
 
-    $withTimeout = new SqlQueue($mysql, visibilityTimeoutSeconds: 2);
+    // visibilityTimeoutSeconds=5 (not 2) is a deliberate margin, not an
+    // arbitrary number: reserved_at is written and compared via PHP's own
+    // time(), whole-second granularity — a worst-case ~1s of truncation
+    // slop plus the "not reclaimed yet" check's own up-to-1s poll window
+    // meant a 2s timeout left near-zero real margin and flaked under CI
+    // jitter. 5s (with sleep(7) below) gives ~3s of margin on both sides,
+    // still fast, no longer riding the edge of the clock's own precision.
+    $withTimeout = new SqlQueue($mysql, visibilityTimeoutSeconds: 5);
     $withTimeout->push(new IntegrationTestJob('will-be-reclaimed'));
     $first = $withTimeout->pop(timeoutSeconds: 5);
     check('SqlQueue: first pop reports attempts=1', $first?->attempts === 1);
@@ -122,7 +129,7 @@ function runSqlQueueVisibilityTimeoutChecks(MysqlConnectionPool $mysql): void
         'SqlQueue: not reclaimed before the visibility timeout elapses',
         $withTimeout->pop(timeoutSeconds: 1, queues: ['default']) === null,
     );
-    sleep(3);
+    sleep(7);
     $reclaimed = $withTimeout->pop(timeoutSeconds: 5);
     check('SqlQueue: job is reclaimed after the visibility timeout elapses', $reclaimed !== null);
     check('SqlQueue: reclaimed job reports attempts=2 (the crash plus this attempt)', $reclaimed?->attempts === 2);
