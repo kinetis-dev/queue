@@ -1,0 +1,62 @@
+{
+    "name": "kinetis/queue",
+    "description": "A backend-agnostic background job queue for Kinetis — Redis and SQL (MySQL/Postgres) backends included, no fluent job-scheduling DSL.",
+    "type": "library",
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "Alon Noy"
+        }
+    ],
+    "require": {
+        "php": "^8.4",
+        "kinetis/kinetis": "dev-main",
+        "kinetis/persistence": "dev-main",
+        "kinetis/cache-redis": "dev-main",
+        "amphp/redis": "^2.0",
+        "amphp/sql": "^2",
+        "psr/container": "^2.0",
+        "psr/log": "^3.0"
+    },
+    "require-dev": {
+        "infection/infection": "^0.34.2",
+        "phpstan/phpstan": "^2.2",
+        "phpunit/phpunit": "^11.0",
+        "vimeo/psalm": "^6.16"
+    },
+    "autoload": {
+        "psr-4": {
+            "Kinetis\\Queue\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Kinetis\\Queue\\Tests\\": "tests/"
+        }
+    },
+    "bin": [
+        "bin/queue"
+    ],
+    "repositories": [
+        {
+            "type": "path",
+            "url": "../kinetis"
+        },
+        {
+            "type": "path",
+            "url": "../persistence"
+        },
+        {
+            "type": "path",
+            "url": "../cache-redis"
+        }
+    ],
+    "config": {
+        "sort-packages": true,
+        "allow-plugins": {
+            "infection/extension-installer": true
+        }
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true
+}

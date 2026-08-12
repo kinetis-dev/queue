@@ -1,0 +1,132 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+use Kinetis\Cache\RoutesFile;
+use Kinetis\Config\Config;
+use Kinetis\Config\EnvFile;
+use Kinetis\Container\AppScope;
+use Kinetis\Events\EventListenerDiscovery;
+use Kinetis\Events\EventListenerRegistry;
+use Kinetis\Persistence\SqlConnectionFactory;
+use Kinetis\Queue\Exception\QueueUnavailableException;
+use Kinetis\Queue\QueueInterface;
+use Kinetis\Queue\QueueWorker;
+use Kinetis\Queue\RedisQueue;
+use Kinetis\Queue\SqlQueue;
+use Kinetis\Runtime\ProjectRoot;
+use Kinetis\SimpleCache\RedisSimpleCache;
+use function Amp\Redis\createRedisClient;
+
+// Same Composer bin-proxy handling as kinetis/kinetis's own bin/kinetis
+// and kinetis/migrations' bin/migrate.
+if (isset($GLOBALS['_composer_autoload_path'])) {
+    $autoloadPath = $GLOBALS['_composer_autoload_path'];
+    unset($GLOBALS['_composer_autoload_path']);
+} else {
+    $autoloadPath = dirname(__DIR__) . '/vendor/autoload.php';
+}
+
+require $autoloadPath;
+
+$projectRoot = ProjectRoot::detect(__DIR__);
+EnvFile::safeLoad($projectRoot);
+
+$command = $argv[1] ?? null;
+
+if ($command !== 'work') {
+    fwrite(STDERR, "Usage: queue work [--queue=high,default]\n");
+    exit(1);
+}
+
+// Priority is expressed by list order, not a numeric per-job score.
+// Defaults to ['default'] when the flag is absent.
+$queues = ['default'];
+
+foreach (array_slice($argv, 2) as $argument) {
+    if (str_starts_with($argument, '--queue=')) {
+        $queues = array_map('trim', explode(',', substr($argument, strlen('--queue='))));
+    }
+}
+
+$config = Config::fromEnvironment();
+
+// QUEUE_CONNECTION has no default, deliberately — the same reasoning
+// bin/migrate's DB_CONNECTION already applies: guessing wrong would run
+// the worker against the wrong backend with no warning at all.
+$connection = $config->required('QUEUE_CONNECTION');
+
+// QUEUE_CONNECTION_NAME selects which named REDIS_*/DB_* connection block
+// (see Kinetis\Config\Config::scopedKey()) this worker uses — 'default'
+// reads the plain keys, unchanged from before this existed.
+$connectionName = $config->string('QUEUE_CONNECTION_NAME', 'default');
+
+if ($connection === 'redis') {
+    $redisConfig = RedisSimpleCache::buildRedisConfig($config, $connectionName);
+
+    if ($redisConfig === null) {
+        throw new InvalidArgumentException('REDIS_URL or REDIS_HOST must be set when QUEUE_CONNECTION=redis.');
+    }
+
+    $queue = new RedisQueue(createRedisClient($redisConfig));
+} elseif ($connection === 'sql') {
+    // QUEUE_VISIBILITY_TIMEOUT_SECONDS has no default — absent means
+    // SqlQueue's own pre-existing behavior (a crashed worker's row stays
+    // reserved forever), unchanged unless explicitly opted into.
+    $visibilityTimeoutRaw = $config->string(Config::scopedKey('QUEUE_VISIBILITY_TIMEOUT_SECONDS', $connectionName), '');
+    $visibilityTimeoutSeconds = $visibilityTimeoutRaw === '' ? null : (int) $visibilityTimeoutRaw;
+    $queue = new SqlQueue(SqlConnectionFactory::fromConfig($config, $connectionName), $visibilityTimeoutSeconds);
+} elseif ($connection === 'sqs') {
+    // kinetis/queue never depends on kinetis/queue-sqs — this class name is
+    // a plain string, checked via class_exists() before any reference to
+    // it triggers autoloading, the same pattern RuntimeDetector uses for
+    // the optional kinetis/bref-adapter and Kinetis\Storage\FilesystemFactory
+    // uses for the optional kinetis/storage-s3.
+    if (!class_exists('Kinetis\QueueSqs\SqsClientFactory')) {
+        throw QueueUnavailableException::missingBackendPackage('sqs', 'kinetis/queue-sqs');
+    }
+
+    $clientFactoryClass = 'Kinetis\QueueSqs\SqsClientFactory';
+    $queueClass = 'Kinetis\QueueSqs\SqsQueue';
+    $queuePrefix = $config->string(Config::scopedKey('QUEUE_SQS_QUEUE_PREFIX', $connectionName), '');
+    $queue = new $queueClass($clientFactoryClass::fromConfig($config, $connectionName), $queuePrefix);
+} elseif ($connection === 'rabbitmq') {
+    // kinetis/queue never depends on kinetis/queue-rabbitmq — this class
+    // name is a plain string, checked via class_exists() before any
+    // reference to it triggers autoloading, the same pattern used above
+    // for the optional kinetis/queue-sqs.
+    if (!class_exists('Kinetis\QueueRabbitMq\RabbitMqClientFactory')) {
+        throw QueueUnavailableException::missingBackendPackage('rabbitmq', 'kinetis/queue-rabbitmq');
+    }
+
+    $clientFactoryClass = 'Kinetis\QueueRabbitMq\RabbitMqClientFactory';
+    $queueClass = 'Kinetis\QueueRabbitMq\RabbitMqQueue';
+    $queuePrefix = $config->string(Config::scopedKey('QUEUE_RABBITMQ_QUEUE_PREFIX', $connectionName), '');
+    $queue = new $queueClass($clientFactoryClass::fromConfig($config, $connectionName), $queuePrefix);
+} else {
+    throw new InvalidArgumentException('QUEUE_CONNECTION must be "redis", "sql", "sqs", or "rabbitmq".');
+}
+
+/** @var QueueInterface $queue */
+$app = new AppScope();
+$app->instance(Config::class, $config);
+// Consumer applications register anything their own jobs/queued listeners
+// need (a database connection pool, ...) in bootstrap.php — the same
+// convention kinetis/kinetis's own public/index.php and bin/kinetis use,
+// necessary here for the identical reason: this binary constructs a
+// plain AppScope with no knowledge of what a specific app's jobs need.
+RoutesFile::loadBootstrap($projectRoot)($app, $config);
+// Always a live scan — this worker is a persistent process, so
+// discovery only runs once at boot.
+$app->instance(EventListenerRegistry::class, EventListenerDiscovery::discover($projectRoot));
+$app->boot();
+
+$pollTimeoutSeconds = $config->int('QUEUE_POLL_TIMEOUT', 5);
+
+// Defaults to 0 (no retries) when unset. A job's own
+// push(maxAttempts: ...) always overrides this.
+$defaultMaxAttempts = $config->int('QUEUE_MAX_ATTEMPTS', 0);
+
+fwrite(STDOUT, "Queue worker started ({$connection}), listening on: " . implode(', ', $queues) . "\n");
+(new QueueWorker($app, $queue, $defaultMaxAttempts))->run($pollTimeoutSeconds, $queues);
