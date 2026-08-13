@@ -55,6 +55,14 @@ final class JobSerializer
     }
 
     /**
+     * Constructs whatever class name the queue payload carries, with the
+     * payload's own arguments — so anyone who can write to the queue
+     * backend can instantiate any class the worker can autoload, with
+     * constructor arguments of their choosing. The queue is trusted
+     * infrastructure on the same tier as the database, not an input
+     * boundary: protect write access to the backend itself rather than
+     * expecting this method to reject a hostile payload.
+     *
      * @param class-string $class
      * @param array<string, mixed> $args
      */
