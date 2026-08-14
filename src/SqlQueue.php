@@ -4,14 +4,15 @@ declare(strict_types=1);
 
 namespace Kinetis\Queue;
 
-use Amp\Sql\SqlLink;
+use Kinetis\Persistence\Contract\SqlLink;
 use Kinetis\Async\Timer;
 use Kinetis\Persistence\TransactionGuard;
 use Psr\Log\NullLogger;
 use function Kinetis\Async\concurrently;
 
 /**
- * Typed against the generic Amp\Sql\SqlLink, not MysqlLink|PostgresLink —
+ * Typed against the generic Kinetis\Persistence\Contract\SqlLink, not
+ * MysqlLink|PostgresLink —
  * the same reasoning SqlMigrationRepository already uses: `SELECT ...
  * FOR UPDATE SKIP LOCKED` is standard SQL supported identically by both
  * MySQL 8+ and Postgres 9.5+, so there's no dialect to isolate — including
@@ -81,7 +82,7 @@ final class SqlQueue implements QueueInterface
     private const POLL_INTERVAL_SECONDS = 1.0;
 
     /**
-     * @param SqlLink<*, *, *> $db
+     * @param SqlLink $db
      */
     public function __construct(
         private readonly SqlLink $db,
@@ -224,7 +225,7 @@ final class SqlQueue implements QueueInterface
         /**
          * @psalm-suppress NoValue Psalm's template inference for
          *     TransactionGuard::transaction()'s generic T, combined with
-         *     Amp\Sql's own generic SqlLink/SqlTransaction templates,
+         *     the SqlLink/SqlTransaction contracts,
          *     collapses to an impossible type here for a closure with two
          *     return points (null and array) — confirmed not reproducible
          *     in a minimal, simplified standalone repro using plain,

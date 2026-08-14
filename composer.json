@@ -14,7 +14,6 @@
         "kinetis/persistence": "dev-main",
         "kinetis/cache-redis": "dev-main",
         "amphp/redis": "^2.0",
-        "amphp/sql": "^2",
         "psr/container": "^2.0",
         "psr/log": "^3.0"
     },
