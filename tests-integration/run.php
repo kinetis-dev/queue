@@ -13,8 +13,8 @@ declare(strict_types=1);
 
 require __DIR__ . '/../vendor/autoload.php';
 
-use Amp\Mysql\MysqlConfig;
-use Amp\Mysql\MysqlConnectionPool;
+use Kinetis\Persistence\Contract\MysqlLink;
+use Kinetis\Persistence\Driver\MysqliAsyncClient;
 use Kinetis\Queue\Job;
 use Kinetis\Queue\QueuedJob;
 use Kinetis\Queue\QueueInterface;
@@ -94,7 +94,7 @@ function runQueueChecks(string $backend, QueueInterface $queue): void
  * correctly increments attempts (crediting the crashed attempt), while a
  * genuinely fresh row's first reservation stays unaffected.
  */
-function runSqlQueueVisibilityTimeoutChecks(MysqlConnectionPool $mysql): void
+function runSqlQueueVisibilityTimeoutChecks(MysqlLink $mysql): void
 {
     echo "=== SqlQueue visibility timeout ===\n";
 
@@ -147,12 +147,13 @@ function runSqlQueueVisibilityTimeoutChecks(MysqlConnectionPool $mysql): void
 $redis = createRedisClient('redis://' . (getenv('REDIS_HOST') ?: '127.0.0.1') . ':6379');
 runQueueChecks('RedisQueue', new RedisQueue($redis));
 
-$mysql = new MysqlConnectionPool(new MysqlConfig(
-    host: getenv('MYSQL_HOST') ?: '127.0.0.1',
-    user: getenv('MYSQL_USER') ?: 'testuser',
-    password: getenv('MYSQL_PASSWORD') ?: 'testpass',
-    database: getenv('MYSQL_DATABASE') ?: 'testdb',
-));
+$mysql = new MysqliAsyncClient(
+    getenv('MYSQL_HOST') ?: '127.0.0.1',
+    getenv('MYSQL_USER') ?: 'testuser',
+    getenv('MYSQL_PASSWORD') ?: 'testpass',
+    getenv('MYSQL_DATABASE') ?: 'testdb',
+    (int) (getenv('MYSQL_PORT') ?: 3306),
+);
 $mysql->execute('DROP TABLE IF EXISTS kinetis_queue_jobs');
 $mysql->execute(<<<'SQL'
     CREATE TABLE kinetis_queue_jobs (
