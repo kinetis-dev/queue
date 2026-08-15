@@ -54,11 +54,9 @@ use function Kinetis\Async\concurrently;
  * read back on every pop() into QueuedJob, so a caller can decide between
  * release() and fail() without querying the table directly.
  *
- * $visibilityTimeoutSeconds closes a real, previously-disclosed-but-not-
- * fixed gap — flagged directly by an independent security/correctness
- * review: unlike RedisQueue (whose own docblock already disclosed the
- * equivalent gap explicitly), a worker that pops a job and then crashes
- * before ack()/release() runs left that row permanently stranded, with
+ * $visibilityTimeoutSeconds closes a real gap: without it, a worker
+ * that pops a job and then crashes
+ * before ack()/release() runs leaves that row permanently stranded, with
  * `reserved_at` set forever and no other worker able to reclaim it —
  * `null` (the default) preserves that exact pre-existing behavior
  * unchanged. Passing a real value makes reserveNext()'s own query also
@@ -70,8 +68,8 @@ use function Kinetis\Async\concurrently;
  * every crash-loop iteration), so `maxAttempts` still eventually gives up
  * on a job whose worker keeps crashing rather than retrying it forever
  * with no cap; a genuinely fresh (never-reserved) row's own first
- * reservation is unaffected, still leaving `attempts` untouched until an
- * actual release() call, exactly as before this existed.
+ * reservation is unaffected, leaving `attempts` untouched until an
+ * actual release() call.
  */
 final class SqlQueue implements QueueInterface
 {
