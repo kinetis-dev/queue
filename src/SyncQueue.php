@@ -13,7 +13,7 @@ use Kinetis\Container\AppScope;
  * are no-ops, since QueueWorker only ever calls them after a non-null
  * pop(), which never happens here.
  *
- * Not selectable via bin/queue's QUEUE_CONNECTION — there's nothing for a
+ * Not selectable via QUEUE_CONNECTION — there's nothing for a
  * worker process to do against a backend that never stores anything.
  * Construct and register it directly in your own application bootstrap
  * instead, typically gated on APP_ENV.

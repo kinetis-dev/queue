@@ -33,9 +33,12 @@
             "Kinetis\\Queue\\Tests\\": "tests/"
         }
     },
-    "bin": [
-        "bin/queue"
-    ],
+    "extra": {
+        "kinetis": {
+            "scan": "Kinetis\\Queue\\Console\\",
+            "bootstrap": "Kinetis\\Queue\\PackageBootstrap"
+        }
+    },
     "repositories": [
         {
             "type": "path",

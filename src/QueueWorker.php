@@ -37,7 +37,8 @@ use Throwable;
  * $defaultMaxAttempts is the cap applied to a job that didn't set its own
  * at push() time (QueuedJob::$maxAttempts null) — a job's own
  * push(maxAttempts: ...) always wins. Non-nullable, defaulting to 0 (no
- * retries); bin/queue reads its value from QUEUE_MAX_ATTEMPTS.
+ * retries); the queue:work command reads its value from
+ * QUEUE_MAX_ATTEMPTS.
  */
 final readonly class QueueWorker
 {
