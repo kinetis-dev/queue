@@ -4,8 +4,10 @@ declare(strict_types=1);
 
 namespace Kinetis\Queue;
 
+use Kinetis\Instrumentation\Telemetry;
 use Amp\Redis\Command\Boundary\ScoreBoundary;
 use Amp\Redis\RedisClient;
+use Throwable;
 
 /**
  * A naive Redis list pop already removes the item at pop time — if a
@@ -56,15 +58,23 @@ final readonly class RedisQueue implements QueueInterface
     #[\Override]
     public function push(Job $job, int $delaySeconds = 0, string $queue = 'default', ?int $maxAttempts = null): void
     {
-        $payload = self::encode(JobSerializer::serialize($job), attempts: 0, maxAttempts: $maxAttempts);
+        $telemetryToken = Telemetry::global()->jobPushStarted($job::class, $queue);
 
-        if ($delaySeconds > 0) {
-            $this->redis->getSortedSet(self::delayedKey($queue))->add([$payload => (float) (time() + $delaySeconds)]);
+        try {
+            $payload = self::encode(JobSerializer::serialize($job), attempts: 0, maxAttempts: $maxAttempts);
 
-            return;
+            if ($delaySeconds > 0) {
+                $this->redis->getSortedSet(self::delayedKey($queue))->add([$payload => (float) (time() + $delaySeconds)]);
+            } else {
+                $this->redis->getList(self::pendingKey($queue))->pushHead($payload);
+            }
+
+            Telemetry::global()->jobPushEnded($telemetryToken, null);
+        } catch (Throwable $e) {
+            Telemetry::global()->jobPushEnded($telemetryToken, $e);
+
+            throw $e;
         }
-
-        $this->redis->getList(self::pendingKey($queue))->pushHead($payload);
     }
 
     #[\Override]

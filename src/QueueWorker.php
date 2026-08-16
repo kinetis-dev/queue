@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Kinetis\Queue;
 
+use Kinetis\Instrumentation\Telemetry;
 use Kinetis\Container\AppScope;
 use Psr\Log\LoggerInterface;
 use Throwable;
@@ -143,12 +144,15 @@ final class QueueWorker
         }
 
         $scope = $this->app->createRequestScope();
+        $telemetry = Telemetry::global();
+        $jobToken = $telemetry->jobStarted($queuedJob->class, $queuedJob->queue, $queuedJob->attempts);
 
         try {
             /** @var Job $job */
             $job = JobSerializer::deserialize($queuedJob->class, $queuedJob->args);
             JobInvoker::invoke($job, $scope);
             $this->queue->ack($queuedJob);
+            $telemetry->jobFinished($jobToken, 'ack', null);
         } catch (Throwable $e) {
             $maxAttempts = $queuedJob->maxAttempts ?? $this->defaultMaxAttempts;
             $exhausted = $queuedJob->attempts >= $maxAttempts;
@@ -165,8 +169,10 @@ final class QueueWorker
 
             if ($exhausted) {
                 $this->queue->fail($queuedJob);
+                $telemetry->jobFinished($jobToken, 'fail', $e);
             } else {
                 $this->queue->release($queuedJob);
+                $telemetry->jobFinished($jobToken, 'release', $e);
             }
         } finally {
             $scope->dispose();

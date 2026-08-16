@@ -4,7 +4,9 @@ declare(strict_types=1);
 
 namespace Kinetis\Queue;
 
+use Kinetis\Instrumentation\Telemetry;
 use Kinetis\Container\AppScope;
+use Throwable;
 
 /**
  * Runs a job's handle() immediately, inline, in push() itself — no
@@ -48,12 +50,21 @@ final readonly class SyncQueue implements QueueInterface
     #[\Override]
     public function push(Job $job, int $delaySeconds = 0, string $queue = 'default', ?int $maxAttempts = null): void
     {
-        $scope = $this->app->createRequestScope();
+        $telemetryToken = Telemetry::global()->jobPushStarted($job::class, $queue);
 
         try {
-            JobInvoker::invoke($job, $scope);
-        } finally {
-            $scope->dispose();
+            $scope = $this->app->createRequestScope();
+
+            try {
+                JobInvoker::invoke($job, $scope);
+            } finally {
+                $scope->dispose();
+            }
+            Telemetry::global()->jobPushEnded($telemetryToken, null);
+        } catch (Throwable $e) {
+            Telemetry::global()->jobPushEnded($telemetryToken, $e);
+
+            throw $e;
         }
     }
 

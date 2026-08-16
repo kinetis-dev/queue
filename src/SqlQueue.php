@@ -4,11 +4,13 @@ declare(strict_types=1);
 
 namespace Kinetis\Queue;
 
+use Kinetis\Instrumentation\Telemetry;
 use Kinetis\Persistence\Contract\SqlLink;
 use Kinetis\Async\Timer;
 use Kinetis\Persistence\TransactionGuard;
 use Psr\Log\NullLogger;
 use function Kinetis\Async\concurrently;
+use Throwable;
 
 /**
  * Typed against the generic Kinetis\Persistence\Contract\SqlLink, not
@@ -90,20 +92,29 @@ final class SqlQueue implements QueueInterface
     #[\Override]
     public function push(Job $job, int $delaySeconds = 0, string $queue = 'default', ?int $maxAttempts = null): void
     {
-        $serialized = JobSerializer::serialize($job);
-        $now = self::now();
+        $telemetryToken = Telemetry::global()->jobPushStarted($job::class, $queue);
 
-        $this->db->execute(
-            'INSERT INTO ' . self::TABLE . ' (class, args, queue, available_at, attempts, max_attempts, created_at) VALUES (?, ?, ?, ?, 0, ?, ?)',
-            [
-                $serialized['class'],
-                json_encode($serialized['args'], JSON_THROW_ON_ERROR),
-                $queue,
-                self::formatTimestamp(time() + $delaySeconds),
-                $maxAttempts,
-                $now,
-            ],
-        );
+        try {
+            $serialized = JobSerializer::serialize($job);
+            $now = self::now();
+
+            $this->db->execute(
+                'INSERT INTO ' . self::TABLE . ' (class, args, queue, available_at, attempts, max_attempts, created_at) VALUES (?, ?, ?, ?, 0, ?, ?)',
+                [
+                    $serialized['class'],
+                    json_encode($serialized['args'], JSON_THROW_ON_ERROR),
+                    $queue,
+                    self::formatTimestamp(time() + $delaySeconds),
+                    $maxAttempts,
+                    $now,
+                ],
+            );
+            Telemetry::global()->jobPushEnded($telemetryToken, null);
+        } catch (Throwable $e) {
+            Telemetry::global()->jobPushEnded($telemetryToken, $e);
+
+            throw $e;
+        }
     }
 
     #[\Override]
