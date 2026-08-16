@@ -57,4 +57,26 @@ interface QueueInterface
      * "gave up" even where the underlying removal is identical.
      */
     public function fail(QueuedJob $job): void;
+
+    /**
+     * Jobs waiting to be popped from $queue — the number a worker still
+     * has ahead of it, which is what answers "is this queue backing up?".
+     *
+     * Excludes jobs currently reserved by a worker and jobs still inside
+     * their push() delay, since neither is available to pop. Backends
+     * whose native count is an estimate rather than an exact figure say
+     * so in their own docblock; treat the result as a monitoring signal,
+     * not a value to branch on.
+     */
+    public function size(string $queue = 'default'): int;
+
+    /**
+     * Discards every job waiting on $queue, returning how many were
+     * removed. Jobs a worker has already reserved are untouched — they
+     * belong to that worker until it acks, releases, or fails them.
+     *
+     * Destructive and unrecoverable: there is no dead-letter copy to
+     * restore from.
+     */
+    public function clear(string $queue = 'default'): int;
 }

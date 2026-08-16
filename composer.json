@@ -23,6 +23,9 @@
         "phpunit/phpunit": "^11.0",
         "vimeo/psalm": "^6.16"
     },
+    "suggest": {
+        "ext-pcntl": "Lets `kinetis queue:work` stop gracefully on SIGTERM, finishing the job in flight instead of being killed mid-job. Not loaded by default in the official PHP Docker images."
+    },
     "autoload": {
         "psr-4": {
             "Kinetis\\Queue\\": "src/"

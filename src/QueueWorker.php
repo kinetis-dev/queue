@@ -39,25 +39,91 @@ use Throwable;
  * push(maxAttempts: ...) always wins. Non-nullable, defaulting to 0 (no
  * retries); the queue:work command reads its value from
  * QUEUE_MAX_ATTEMPTS.
+ *
+ * SIGTERM and SIGINT stop the loop after the job in flight finishes, so
+ * a deploy or `docker compose restart` never kills a worker mid-job and
+ * strands it in the backend's reserved/processing state. Kinetis leaves
+ * process supervision itself to whatever already runs the worker —
+ * Docker, systemd, Kubernetes — and every one of those sends SIGTERM
+ * before SIGKILL, so cooperating with that signal is all the graceful
+ * half of a restart needs.
  */
-final readonly class QueueWorker
+final class QueueWorker
 {
+    private bool $shouldStop = false;
+
     public function __construct(
-        private AppScope $app,
-        private QueueInterface $queue,
-        private int $defaultMaxAttempts = 0,
+        private readonly AppScope $app,
+        private readonly QueueInterface $queue,
+        private readonly int $defaultMaxAttempts = 0,
     ) {}
 
     /**
-     * Runs forever, one job at a time.
+     * Runs until stopped, one job at a time. Returns only after a
+     * shutdown signal (or a stop() call) and the job in flight at that
+     * point has finished.
      *
      * @param list<string> $queues checked in priority order — see
      *     QueueInterface::pop()
      */
-    public function run(int $pollTimeoutSeconds = 5, array $queues = ['default']): never
+    public function run(int $pollTimeoutSeconds = 5, array $queues = ['default']): void
     {
-        while (true) {
+        $this->listenForShutdownSignals();
+
+        while (!$this->shouldStop) {
             $this->processNext($pollTimeoutSeconds, $queues);
+        }
+    }
+
+    /**
+     * Stops the loop before the next job is popped. Called by the signal
+     * handlers, and directly by anything driving the worker itself.
+     */
+    public function stop(): void
+    {
+        $this->shouldStop = true;
+    }
+
+    public function shouldStop(): bool
+    {
+        return $this->shouldStop;
+    }
+
+    /**
+     * Whether this process can stop gracefully at all. ext-pcntl is a
+     * CLI-only extension and absent from the official PHP Docker images
+     * unless explicitly installed (`docker-php-ext-install pcntl`);
+     * without it there is no way to observe SIGTERM, so supervision can
+     * only kill the worker outright and whatever job was in flight is
+     * left for the backend's reclaim mechanism.
+     *
+     * Callers that can report this to an operator should — a worker
+     * silently lacking graceful shutdown looks identical to one that has
+     * it, right up to the deploy that truncates a job.
+     */
+    public static function supportsGracefulShutdown(): bool
+    {
+        return \function_exists('pcntl_async_signals') && \function_exists('pcntl_signal');
+    }
+
+    /**
+     * Async signal dispatch means a signal arriving mid-job sets the flag
+     * without interrupting the job — the loop reads it once that job has
+     * been acked or released, which is what makes the shutdown safe
+     * rather than merely quick.
+     */
+    private function listenForShutdownSignals(): void
+    {
+        if (!self::supportsGracefulShutdown()) {
+            return;
+        }
+
+        \pcntl_async_signals(true);
+
+        foreach ([\SIGTERM, \SIGINT] as $signal) {
+            \pcntl_signal($signal, function (): void {
+                $this->stop();
+            });
         }
     }
 

@@ -13,7 +13,10 @@ use Kinetis\Queue\QueueWorker;
 
 /**
  * The queue worker loop as a `kinetis` command, discovered via this
- * package's extra.kinetis scan root. The queue backend resolves through
+ * package's extra.kinetis scan root. Returns 0 once SIGTERM or SIGINT
+ * has stopped the loop and the job in flight has finished — which needs
+ * ext-pcntl; without it the loop cannot observe signals at all, and the
+ * startup warning below is the operator's only cue. The queue backend resolves through
  * the container — bound by this package's own PackageBootstrap from
  * QUEUE_CONNECTION, or by the application's bootstrap.php overriding it.
  *
@@ -31,7 +34,7 @@ final readonly class WorkCommand
     ) {}
 
     #[Command('queue:work', description: 'Run the queue worker loop. --queue=high,default sets priority order.')]
-    public function run(CommandArguments $arguments): never
+    public function run(CommandArguments $arguments): int
     {
         // Priority is expressed by list order, not a numeric per-job
         // score. Defaults to ['default'] when the flag is absent.
@@ -47,6 +50,17 @@ final readonly class WorkCommand
         $defaultMaxAttempts = $this->config->int('QUEUE_MAX_ATTEMPTS', 0);
 
         fwrite(STDOUT, 'Queue worker started, listening on: ' . implode(', ', $queues) . "\n");
+
+        if (!QueueWorker::supportsGracefulShutdown()) {
+            fwrite(
+                STDERR,
+                "Warning: ext-pcntl is not loaded, so SIGTERM cannot stop this worker between jobs. "
+                . "A deploy will interrupt whatever job is running. Install pcntl to avoid that.\n",
+            );
+        }
         new QueueWorker($this->scope->appScope(), $this->queue, $defaultMaxAttempts)->run($pollTimeoutSeconds, $queues);
+        fwrite(STDOUT, "Queue worker stopped.\n");
+
+        return 0;
     }
 }

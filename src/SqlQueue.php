@@ -188,6 +188,58 @@ final class SqlQueue implements QueueInterface
     }
 
     /**
+     * Unreserved rows on this queue, delayed ones included — a job still
+     * inside its push() delay is outstanding work even though no worker
+     * can pop it yet. Rows a worker holds (`reserved_at` set) belong to
+     * that worker and are excluded — with the same expired-reservation
+     * carve-out pop() applies: under a visibility timeout, a reservation
+     * older than the timeout is reclaimable, so the job counts as
+     * waiting again.
+     */
+    #[\Override]
+    public function size(string $queue = 'default'): int
+    {
+        [$condition, $params] = $this->waitingCondition($queue);
+
+        $row = $this->db
+            ->execute('SELECT COUNT(*) AS c FROM ' . self::TABLE . " WHERE {$condition}", $params)
+            ->fetchRow();
+
+        return (int) ($row['c'] ?? 0);
+    }
+
+    #[\Override]
+    public function clear(string $queue = 'default'): int
+    {
+        [$condition, $params] = $this->waitingCondition($queue);
+
+        // getRowCount() is nullable on the contract for result sets that
+        // cannot report one; a DELETE always can.
+        return $this->db
+            ->execute('DELETE FROM ' . self::TABLE . " WHERE {$condition}", $params)
+            ->getRowCount() ?? 0;
+    }
+
+    /**
+     * The "waiting" predicate size() and clear() share, mirroring
+     * reserveNext()'s own reserved-row handling so the three never
+     * disagree about which jobs a worker could still pick up.
+     *
+     * @return array{string, list<string>}
+     */
+    private function waitingCondition(string $queue): array
+    {
+        if ($this->visibilityTimeoutSeconds === null) {
+            return ['queue = ? AND reserved_at IS NULL', [$queue]];
+        }
+
+        return [
+            'queue = ? AND (reserved_at IS NULL OR reserved_at <= ?)',
+            [$queue, self::formatTimestamp(time() - $this->visibilityTimeoutSeconds)],
+        ];
+    }
+
+    /**
      * @param list<string> $queues checked in priority order via a portable
      *     `ORDER BY CASE queue WHEN ? THEN 0 WHEN ? THEN 1 ... END` — not
      *     MySQL's own FIELD(), which Postgres has no equivalent for

@@ -125,6 +125,28 @@ final readonly class RedisQueue implements QueueInterface
         $this->removeFromProcessing($job);
     }
 
+    /**
+     * Pending plus delayed: a delayed job is waiting on this queue even
+     * while its own delay keeps it from being popped yet, so counting it
+     * is what makes "how much work is outstanding" match reality. The
+     * processing list is excluded — those belong to a worker already.
+     */
+    #[\Override]
+    public function size(string $queue = 'default'): int
+    {
+        return $this->redis->getList(self::pendingKey($queue))->getSize()
+            + $this->redis->getSortedSet(self::delayedKey($queue))->getSize();
+    }
+
+    #[\Override]
+    public function clear(string $queue = 'default'): int
+    {
+        $size = $this->size($queue);
+        $this->redis->delete(self::pendingKey($queue), self::delayedKey($queue));
+
+        return $size;
+    }
+
     private function removeFromProcessing(QueuedJob $job): void
     {
         /** @var string $payload */

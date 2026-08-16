@@ -88,6 +88,19 @@ final class InMemoryQueue implements QueueInterface
         $this->failed[] = $handle;
     }
 
+    public function size(string $queue = 'default'): int
+    {
+        return \count($this->pending[$queue] ?? []);
+    }
+
+    public function clear(string $queue = 'default'): int
+    {
+        $size = $this->size($queue);
+        $this->pending[$queue] = [];
+
+        return $size;
+    }
+
     public function isEmpty(string $queue = 'default'): bool
     {
         return ($this->pending[$queue] ?? []) === [];

@@ -1,0 +1,11 @@
+<?php
+
+/**
+ * ext-pcntl is CLI-only and not loaded in the images this package's
+ * static analysis runs in, so these constants are declared for Psalm.
+ * QueueWorker guards every use behind function_exists() — see
+ * QueueWorker::supportsGracefulShutdown().
+ */
+
+const SIGTERM = 15;
+const SIGINT = 2;

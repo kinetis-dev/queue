@@ -221,4 +221,41 @@ final class QueueWorkerTest extends TestCase
         self::assertSame([], $queue->released);
         self::assertCount(1, $queue->failed);
     }
+
+    public function test_run_returns_once_stopped_and_finishes_the_job_in_flight(): void
+    {
+        $app = $this->app();
+        $queue = new InMemoryQueue();
+        $queue->push(new RecordingJob('first'));
+        $queue->push(new RecordingJob('second'));
+
+        $worker = new QueueWorker($app, $queue);
+
+        // Stop from inside the loop, standing in for a signal arriving
+        // mid-job: the job in flight still completes, the next never
+        // starts, and run() returns instead of looping forever.
+        $app->get(Recorder::class)->onRecord = static function () use ($worker): void {
+            $worker->stop();
+        };
+
+        $worker->run(pollTimeoutSeconds: 0);
+
+        self::assertSame(['first'], $app->get(Recorder::class)->messages);
+        self::assertSame([1], $queue->acked);
+        self::assertTrue($worker->shouldStop());
+    }
+
+    public function test_a_worker_stopped_before_it_starts_processes_nothing(): void
+    {
+        $app = $this->app();
+        $queue = new InMemoryQueue();
+        $queue->push(new RecordingJob('never runs'));
+
+        $worker = new QueueWorker($app, $queue);
+        $worker->stop();
+        $worker->run(pollTimeoutSeconds: 0);
+
+        self::assertSame([], $app->get(Recorder::class)->messages);
+        self::assertSame(1, $queue->size());
+    }
 }

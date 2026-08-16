@@ -14,6 +14,10 @@
     findUnusedBaselineEntry="true"
     findUnusedCode="false"
 >
+    <stubs>
+        <file name="stubs/pcntl.phpstub" />
+    </stubs>
+
     <projectFiles>
         <directory name="src" />
         <ignoreFiles>

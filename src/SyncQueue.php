@@ -83,4 +83,20 @@ final readonly class SyncQueue implements QueueInterface
         // No-op: QueueWorker only calls this after a non-null pop(), which
         // never happens here — see the class docblock.
     }
+
+    /**
+     * Always empty: push() runs the job inline, so nothing is ever
+     * waiting.
+     */
+    #[\Override]
+    public function size(string $queue = 'default'): int
+    {
+        return 0;
+    }
+
+    #[\Override]
+    public function clear(string $queue = 'default'): int
+    {
+        return 0;
+    }
 }

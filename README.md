@@ -56,7 +56,10 @@ following automatically, through the `extra.kinetis` declaration in its
 `composer.json` (see
 [docs.kinetis.dev/cli.html](https://docs.kinetis.dev/cli.html)):
 
-- **Command**: `queue:work` on `vendor/bin/kinetis` — the worker loop.
+- **Commands** on `vendor/bin/kinetis`: `queue:work` (the worker loop,
+  stopping gracefully on SIGTERM once the job in flight finishes),
+  `queue:stats` (how many jobs are waiting), and `queue:clear`
+  (discard waiting jobs, requires `--force`).
 - **Service binding**: with `QUEUE_CONNECTION` set, `QueueInterface` is
   bound to the selected backend before your own `bootstrap.php` runs —
   your registration wins on the same binding. Inert when
