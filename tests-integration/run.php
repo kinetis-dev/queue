@@ -165,6 +165,7 @@ $mysql->execute(<<<'SQL'
         reserved_at TIMESTAMP NULL,
         attempts INT UNSIGNED NOT NULL DEFAULT 0,
         max_attempts INT UNSIGNED NULL,
+        metadata TEXT NULL,
         created_at TIMESTAMP NOT NULL,
         INDEX kinetis_queue_jobs_queue_available_at_index (queue, available_at, reserved_at)
     )
