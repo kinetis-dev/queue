@@ -97,15 +97,17 @@ final class SqlQueue implements QueueInterface
         try {
             $serialized = JobSerializer::serialize($job);
             $now = self::now();
+            $metadata = Telemetry::global()->jobPushMetadata($telemetryToken);
 
             $this->db->execute(
-                'INSERT INTO ' . self::TABLE . ' (class, args, queue, available_at, attempts, max_attempts, created_at) VALUES (?, ?, ?, ?, 0, ?, ?)',
+                'INSERT INTO ' . self::TABLE . ' (class, args, queue, available_at, attempts, max_attempts, metadata, created_at) VALUES (?, ?, ?, ?, 0, ?, ?, ?)',
                 [
                     $serialized['class'],
                     json_encode($serialized['args'], JSON_THROW_ON_ERROR),
                     $queue,
                     self::formatTimestamp(time() + $delaySeconds),
                     $maxAttempts,
+                    $metadata === [] ? null : json_encode($metadata, JSON_THROW_ON_ERROR),
                     $now,
                 ],
             );
@@ -159,6 +161,11 @@ final class SqlQueue implements QueueInterface
                 /** @var class-string<Job> $class */
                 $class = $row['class'];
 
+                /** @var array<string, string> $metadata */
+                $metadata = isset($row['metadata']) && \is_string($row['metadata'])
+                    ? json_decode($row['metadata'], true, flags: JSON_THROW_ON_ERROR)
+                    : [];
+
                 return new QueuedJob(
                     $class,
                     $args,
@@ -166,6 +173,7 @@ final class SqlQueue implements QueueInterface
                     queue: (string) $row['queue'],
                     attempts: (int) $row['attempts'] + 1,
                     maxAttempts: $row['max_attempts'] !== null ? (int) $row['max_attempts'] : null,
+                    metadata: $metadata,
                 );
             }
 

@@ -39,5 +39,13 @@ final readonly class QueuedJob
         public string $queue,
         public int $attempts = 1,
         public ?int $maxAttempts = null,
+        /**
+         * Opaque string metadata stored with the job at push time —
+         * the instrumentation propagation channel. Backends carry it
+         * verbatim; nothing in the queue layer interprets it.
+         *
+         * @var array<string, string>
+         */
+        public array $metadata = [],
     ) {}
 }

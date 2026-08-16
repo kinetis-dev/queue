@@ -61,7 +61,8 @@ final readonly class RedisQueue implements QueueInterface
         $telemetryToken = Telemetry::global()->jobPushStarted($job::class, $queue);
 
         try {
-            $payload = self::encode(JobSerializer::serialize($job), attempts: 0, maxAttempts: $maxAttempts);
+            $metadata = Telemetry::global()->jobPushMetadata($telemetryToken);
+            $payload = self::encode(JobSerializer::serialize($job), attempts: 0, maxAttempts: $maxAttempts, metadata: $metadata);
 
             if ($delaySeconds > 0) {
                 $this->redis->getSortedSet(self::delayedKey($queue))->add([$payload => (float) (time() + $delaySeconds)]);
@@ -94,7 +95,7 @@ final readonly class RedisQueue implements QueueInterface
                     ->popTailPushHeadBlocking(self::processingKey($queue), self::PER_QUEUE_POLL_TIMEOUT_SECONDS);
 
                 if ($payload !== null) {
-                    /** @var array{class: class-string<Job>, args: array<string, mixed>, attempts: int, maxAttempts: int|null} $decoded */
+                    /** @var array{class: class-string<Job>, args: array<string, mixed>, attempts: int, maxAttempts: int|null, metadata?: array<string, string>} $decoded */
                     $decoded = json_decode($payload, true, flags: JSON_THROW_ON_ERROR);
 
                     return new QueuedJob(
@@ -104,6 +105,7 @@ final readonly class RedisQueue implements QueueInterface
                         queue: $queue,
                         attempts: $decoded['attempts'] + 1,
                         maxAttempts: $decoded['maxAttempts'],
+                        metadata: $decoded['metadata'] ?? [],
                     );
                 }
 
@@ -125,7 +127,7 @@ final readonly class RedisQueue implements QueueInterface
     {
         $this->removeFromProcessing($job);
 
-        $payload = self::encode(['class' => $job->class, 'args' => $job->args], attempts: $job->attempts, maxAttempts: $job->maxAttempts);
+        $payload = self::encode(['class' => $job->class, 'args' => $job->args], attempts: $job->attempts, maxAttempts: $job->maxAttempts, metadata: $job->metadata);
         $this->redis->getList(self::pendingKey($job->queue))->pushHead($payload);
     }
 
@@ -167,9 +169,13 @@ final readonly class RedisQueue implements QueueInterface
     /**
      * @param array{class: class-string, args: array<string, mixed>} $serialized
      */
-    private static function encode(array $serialized, int $attempts, ?int $maxAttempts): string
+    /**
+     * @param array{class: class-string, args: array<string, mixed>} $serialized
+     * @param array<string, string> $metadata
+     */
+    private static function encode(array $serialized, int $attempts, ?int $maxAttempts, array $metadata = []): string
     {
-        return json_encode([...$serialized, 'attempts' => $attempts, 'maxAttempts' => $maxAttempts], JSON_THROW_ON_ERROR);
+        return json_encode([...$serialized, 'attempts' => $attempts, 'maxAttempts' => $maxAttempts, 'metadata' => $metadata], JSON_THROW_ON_ERROR);
     }
 
     /**

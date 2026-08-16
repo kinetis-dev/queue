@@ -145,7 +145,7 @@ final class QueueWorker
 
         $scope = $this->app->createRequestScope();
         $telemetry = Telemetry::global();
-        $jobToken = $telemetry->jobStarted($queuedJob->class, $queuedJob->queue, $queuedJob->attempts);
+        $jobToken = $telemetry->jobStarted($queuedJob->class, $queuedJob->queue, $queuedJob->attempts, $queuedJob->metadata);
 
         try {
             /** @var Job $job */
