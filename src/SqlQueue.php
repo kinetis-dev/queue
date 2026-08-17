@@ -79,6 +79,8 @@ final class SqlQueue implements QueueInterface
 
     private const UPDATE_TABLE = 'UPDATE ' . self::TABLE;
 
+    private const DELETE_TABLE = 'DELETE FROM ' . self::TABLE;
+
     private const POLL_INTERVAL_SECONDS = 1.0;
 
     /**
@@ -188,7 +190,7 @@ final class SqlQueue implements QueueInterface
     #[\Override]
     public function ack(QueuedJob $job): void
     {
-        $this->db->execute('DELETE FROM ' . self::TABLE . ' WHERE id = ?', [$job->handle]);
+        $this->db->execute(self::DELETE_TABLE . ' WHERE id = ?', [$job->handle]);
     }
 
     #[\Override]
@@ -203,7 +205,7 @@ final class SqlQueue implements QueueInterface
     #[\Override]
     public function fail(QueuedJob $job): void
     {
-        $this->db->execute('DELETE FROM ' . self::TABLE . ' WHERE id = ?', [$job->handle]);
+        $this->db->execute(self::DELETE_TABLE . ' WHERE id = ?', [$job->handle]);
     }
 
     /**
@@ -235,7 +237,7 @@ final class SqlQueue implements QueueInterface
         // getRowCount() is nullable on the contract for result sets that
         // cannot report one; a DELETE always can.
         return $this->db
-            ->execute('DELETE FROM ' . self::TABLE . " WHERE {$condition}", $params)
+            ->execute(self::DELETE_TABLE . " WHERE {$condition}", $params)
             ->getRowCount() ?? 0;
     }
 
