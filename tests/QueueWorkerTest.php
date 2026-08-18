@@ -11,6 +11,7 @@ use Kinetis\Queue\Tests\Fixtures\InMemoryQueue;
 use Kinetis\Queue\Tests\Fixtures\Recorder;
 use Kinetis\Queue\Tests\Fixtures\RecordingJob;
 use Kinetis\Queue\Tests\Fixtures\RecordingLogger;
+use Kinetis\Queue\Tests\Fixtures\SensitiveFailingJob;
 use Psr\Log\LoggerInterface;
 use PHPUnit\Framework\TestCase;
 use RuntimeException;
@@ -257,5 +258,59 @@ final class QueueWorkerTest extends TestCase
 
         self::assertSame([], $app->get(Recorder::class)->messages);
         self::assertSame(1, $queue->size());
+    }
+
+    /**
+     * A job that will be retried is still held by the backend with its
+     * payload intact, so the entry carries no copy of it.
+     */
+    public function test_a_retry_does_not_log_the_job_arguments(): void
+    {
+        $logger = new RecordingLogger();
+        $app = $this->app(static fn (AppScope $app) => $app->instance(LoggerInterface::class, $logger));
+
+        $queue = new InMemoryQueue();
+        $queue->push(new SensitiveFailingJob(4812, 'ana@example.com', 'not-a-real-token'), maxAttempts: 2);
+
+        (new QueueWorker($app, $queue))->processNext();
+
+        self::assertCount(1, $logger->entries);
+        self::assertStringNotContainsString('permanently', $logger->entries[0]['message']);
+        self::assertArrayNotHasKey('args', $logger->entries[0]['context']['job']);
+        self::assertSame(SensitiveFailingJob::class, $logger->entries[0]['context']['job']['class']);
+        self::assertStringNotContainsString('not-a-real-token', json_encode($logger->entries[0]['context']['job'], JSON_THROW_ON_ERROR));
+    }
+
+    public function test_giving_up_redacts_the_arguments_marked_sensitive(): void
+    {
+        $logger = new RecordingLogger();
+        $app = $this->app(static fn (AppScope $app) => $app->instance(LoggerInterface::class, $logger));
+
+        $queue = new InMemoryQueue();
+        $queue->push(new SensitiveFailingJob(4812, 'ana@example.com', 'not-a-real-token'), maxAttempts: 1);
+
+        (new QueueWorker($app, $queue))->processNext();
+
+        self::assertCount(1, $logger->entries);
+        self::assertStringContainsString('permanently', $logger->entries[0]['message']);
+        self::assertSame(
+            ['userId' => 4812, 'email' => '[redacted]', 'resetToken' => '[redacted]'],
+            $logger->entries[0]['context']['job']['args'],
+        );
+    }
+
+    public function test_a_failure_is_logged_with_the_queue_and_attempt_it_came_from(): void
+    {
+        $logger = new RecordingLogger();
+        $app = $this->app(static fn (AppScope $app) => $app->instance(LoggerInterface::class, $logger));
+
+        $queue = new InMemoryQueue();
+        $queue->push(new FailingJob('boom'), queue: 'reports', maxAttempts: 1);
+
+        (new QueueWorker($app, $queue))->processNext(queues: ['reports']);
+
+        self::assertCount(1, $logger->entries);
+        self::assertSame('reports', $logger->entries[0]['context']['job']['queue']);
+        self::assertSame(1, $logger->entries[0]['context']['job']['attempts']);
     }
 }

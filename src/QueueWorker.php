@@ -157,14 +157,25 @@ final class QueueWorker
             $maxAttempts = $queuedJob->maxAttempts ?? $this->defaultMaxAttempts;
             $exhausted = $queuedJob->attempts >= $maxAttempts;
 
+            $job = [
+                'class' => $queuedJob->class,
+                'queue' => $queuedJob->queue,
+                'attempts' => $queuedJob->attempts,
+            ];
+
+            // A job that will be retried is still held by the backend with
+            // its payload intact, so logging the arguments adds nothing
+            // recoverable. They are the only surviving record once the job
+            // is given up on, and are redacted there per #[Sensitive].
+            if ($exhausted) {
+                $job['args'] = JobSerializer::redact($queuedJob->class, $queuedJob->args);
+            }
+
             $scope->get(LoggerInterface::class)->error(
                 $exhausted
                     ? "Job \"{$queuedJob->class}\" failed permanently after {$queuedJob->attempts} attempt(s): {$e->getMessage()}"
                     : "Job \"{$queuedJob->class}\" failed (attempt {$queuedJob->attempts}): {$e->getMessage()}",
-                [
-                    'exception' => $e,
-                    'job' => ['class' => $queuedJob->class, 'args' => $queuedJob->args],
-                ],
+                ['exception' => $e, 'job' => $job],
             );
 
             if ($exhausted) {

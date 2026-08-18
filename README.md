@@ -22,7 +22,9 @@ Redis and SQL (MySQL/Postgres) backends included, behind one
 `Kinetis\Queue\QueueInterface` — push a job from application code, a
 separate `kinetis queue:work` worker process pops and runs it. Named,
 priority-ordered queues, bounded retries (`maxAttempts`, defaulting to
-no retries at all), and named connections come built in. Amazon SQS is a
+no retries at all), and named connections come built in. A job given up
+on is logged with its arguments, minus any constructor parameter marked
+`Kinetis\Queue\Attributes\Sensitive`. Amazon SQS is a
 third backend, in the separate `kinetis/queue-sqs`.
 
 ```php
