@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Kinetis\Queue\Tests\Fixtures;
 
+use Kinetis\Queue\Exception\StaleJobHandleException;
 use Kinetis\Queue\Job;
 use Kinetis\Queue\JobSerializer;
 use Kinetis\Queue\QueuedJob;
@@ -33,6 +34,15 @@ final class InMemoryQueue implements QueueInterface
     public array $failed = [];
 
     private int $nextHandle = 1;
+
+    /**
+     * Makes the next release() call throw StaleJobHandleException instead
+     * of actually releasing — QueueWorker's own real backend
+     * (RedisQueue) can throw this when its conditional Lua transition
+     * finds the source entry already gone, and this fixture needs a way
+     * to exercise that path without a real Redis.
+     */
+    public bool $releaseShouldThrowStale = false;
 
     public function push(Job $job, int $delaySeconds = 0, string $queue = 'default', ?int $maxAttempts = null): void
     {
@@ -70,6 +80,12 @@ final class InMemoryQueue implements QueueInterface
 
     public function release(QueuedJob $job): void
     {
+        if ($this->releaseShouldThrowStale) {
+            $this->releaseShouldThrowStale = false;
+
+            throw StaleJobHandleException::forRelease($job->queue);
+        }
+
         /** @var int $handle */
         $handle = $job->handle;
         $this->released[] = $handle;

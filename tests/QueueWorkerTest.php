@@ -77,6 +77,51 @@ final class QueueWorkerTest extends TestCase
         self::assertSame([], $queue->acked);
     }
 
+    /**
+     * A backend's release() can throw StaleJobHandleException when its
+     * own conditional transition finds the source entry already gone —
+     * a duplicate call, or a retry after a connection failure whose
+     * server-side outcome wasn't known at the time. The transition it
+     * wanted has already happened through another path, so the worker
+     * must treat this as a benign, already-achieved outcome rather than
+     * letting it escape processNext() uncaught and crash the loop —
+     * the same "one bad outcome must not stop a long-running process"
+     * guarantee this class already gives every other job.
+     */
+    public function test_a_stale_job_handle_on_release_does_not_crash_the_worker(): void
+    {
+        $logger = new RecordingLogger();
+        $app = $this->app(static fn (AppScope $app) => $app->instance(LoggerInterface::class, $logger));
+
+        $queue = new InMemoryQueue();
+        $queue->push(new FailingJob('deliberate failure'), maxAttempts: 2);
+        $queue->releaseShouldThrowStale = true;
+
+        $worker = new QueueWorker($app, $queue);
+
+        self::assertTrue($worker->processNext());
+        self::assertSame([], $queue->released, 'the fixture recorded no release since it threw instead');
+
+        $infoEntries = array_values(array_filter($logger->entries, static fn (array $entry): bool => $entry['level'] === 'info'));
+        self::assertCount(1, $infoEntries, 'a benign info-level note, not silence, and not another error');
+        self::assertStringContainsString('already released', $infoEntries[0]['message']);
+    }
+
+    public function test_a_stale_job_handle_on_release_does_not_stop_the_worker_from_processing_the_next_one(): void
+    {
+        $app = $this->app();
+        $queue = new InMemoryQueue();
+        $queue->push(new FailingJob('boom'), maxAttempts: 2);
+        $queue->push(new RecordingJob('still runs'));
+        $queue->releaseShouldThrowStale = true;
+
+        $worker = new QueueWorker($app, $queue);
+        $worker->processNext();
+        $worker->processNext();
+
+        self::assertSame(['still runs'], $app->get(Recorder::class)->messages);
+    }
+
     public function test_a_failing_job_is_logged_through_the_container_logger(): void
     {
         $logger = new RecordingLogger();

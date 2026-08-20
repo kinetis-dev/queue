@@ -6,6 +6,7 @@ namespace Kinetis\Queue;
 
 use Kinetis\Instrumentation\Telemetry;
 use Kinetis\Container\AppScope;
+use Kinetis\Queue\Exception\StaleJobHandleException;
 use Psr\Log\LoggerInterface;
 use Throwable;
 
@@ -182,7 +183,26 @@ final class QueueWorker
                 $this->queue->fail($queuedJob);
                 $telemetry->jobFinished($jobToken, 'fail', $e);
             } else {
-                $this->queue->release($queuedJob);
+                try {
+                    $this->queue->release($queuedJob);
+                } catch (StaleJobHandleException) {
+                    // Backend-specific (currently only RedisQueue), but a
+                    // benign outcome regardless of which backend threw
+                    // it: the transition this call wanted has already
+                    // happened through another path — a duplicate
+                    // release() call, or a retry after a connection drop
+                    // whose server-side outcome wasn't known at the time
+                    // it was made — so there's nothing left to do. Caught
+                    // here specifically so it can't crash the worker the
+                    // way an unhandled Throwable from inside this catch
+                    // block otherwise would, defeating the very
+                    // "one bad job must not stop the loop" guarantee this
+                    // class exists to give every other job.
+                    $scope->get(LoggerInterface::class)->info(
+                        "Job \"{$queuedJob->class}\" was already released through another call; nothing more to do.",
+                    );
+                }
+
                 $telemetry->jobFinished($jobToken, 'release', $e);
             }
         } finally {

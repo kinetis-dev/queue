@@ -5,8 +5,8 @@ declare(strict_types=1);
 namespace Kinetis\Queue;
 
 use Kinetis\Instrumentation\Telemetry;
-use Amp\Redis\Command\Boundary\ScoreBoundary;
 use Amp\Redis\RedisClient;
+use Kinetis\Queue\Exception\StaleJobHandleException;
 use Throwable;
 
 /**
@@ -38,18 +38,77 @@ use Throwable;
  * because the worker that popped them crashed before ack()/release()
  * ever ran. That's a real gap, not an oversight — closing it needs a
  * visibility-timeout mechanism (a per-job "reserved at" timestamp plus a
- * periodic scan) this first cut doesn't have yet.
+ * periodic scan) this first cut doesn't have yet. A job in that state is
+ * stranded, not lost — it's still sitting in the processing list, exactly
+ * where a future reaper would find it.
+ *
+ * Two other transitions genuinely could lose a job outright, and both are
+ * fixed the same way: release() (processing -> pending) and
+ * promoteDelayedJobs() (delayed -> pending) each used to be two separate
+ * Redis commands — a process crash between them left the job removed from
+ * the source with nothing ever written to the destination. Both now run
+ * as a single Lua script (eval()) instead, which Redis executes as one
+ * indivisible unit: no other command, including a second worker's own
+ * concurrent promotion, can observe or interleave with a partially-applied
+ * script, and a client that dies before or after the call can never
+ * observe a state where the job exists in neither list, only "still in
+ * the source" or "already in the destination".
+ *
+ * Indivisible isn't the same as conditional, and release() needs both:
+ * its script only performs the LPUSH when the LREM actually found and
+ * removed the source entry (returning that count so the PHP side can
+ * tell), so a second release() call with the same handle — a duplicate
+ * call, a stale QueuedJob, or a retry after a connection drop whose
+ * server-side outcome is unknown — throws Exception\StaleJobHandleException
+ * instead of writing a second replacement onto pending. promoteDelayedJobs()
+ * doesn't need the same guard: it has no caller-supplied handle to go
+ * stale, only a self-contained read-and-move over whatever's currently
+ * ready, so two concurrent calls simply serialize through Redis with
+ * nothing left for the second to double-process.
+ *
+ * Every envelope carries a cryptographically random `id`, generated fresh
+ * only for an independent push() — without it, two pushes with
+ * byte-identical job data produced the exact same JSON string, and a
+ * Redis sorted set's members are unique, so the second push() of a
+ * delayed duplicate silently collapsed onto the first instead of creating
+ * a second entry. release() preserves the `id`/`pushedAt` it reads back
+ * off the envelope it's replacing rather than regenerating them: a fresh
+ * id only ever needed to hold *between* independent pushes, and
+ * regenerating it on every retry would erase the job's own logical
+ * identity and original enqueue time for no benefit. Both are read with
+ * `?? null`, not assumed present: a job pushed by the envelope format
+ * that predates `id`/`pushedAt` is still a valid, poppable payload after
+ * an upgrade, and release()ing one falls through to encode()'s own
+ * fresh-value default rather than a missing-key warning (or, worse, an
+ * exception in an application that turns warnings into one — with no
+ * reaper, that would strand the job in `processing` indefinitely). Once
+ * released, the job's envelope is the current format from then on.
  *
  * Redis has no per-job columns the way SqlQueue has an `attempts` column,
  * so attempts/maxAttempts travel inside the JSON payload itself —
- * {class, args, attempts, maxAttempts} — reread and rewritten by
- * release() on every retry. The stored value is the number of *completed*
- * attempts (0 at push time); QueuedJob::$attempts is always that value
- * plus one.
+ * {id, pushedAt, class, args, attempts, maxAttempts, metadata} — reread
+ * and rewritten by release() on every retry. The stored value is the
+ * number of *completed* attempts (0 at push time); QueuedJob::$attempts
+ * is always that value plus one.
  */
 final readonly class RedisQueue implements QueueInterface
 {
     private const PER_QUEUE_POLL_TIMEOUT_SECONDS = 1;
+
+    /**
+     * A ceiling on how many delayed jobs promoteDelayedJobs() moves in one
+     * call. Without one, a large ready backlog is read and moved entirely
+     * inside a single Lua script — Redis executes one command at a time,
+     * so every other client sharing this Redis (cache reads, other
+     * queues) stalls for the full duration. Redis's own Lua time-limit
+     * setting doesn't help once writes have started: it warns/blocks
+     * other clients rather than rolling the script back, so it's not a
+     * safe substitute for bounding the work up front. Any excess stays in
+     * the delayed set (still due, since their score is unchanged) and is
+     * picked up by pop()'s own loop, which already calls this on every
+     * iteration.
+     */
+    private const int DELAYED_PROMOTION_BATCH_SIZE = 100;
 
     public function __construct(
         private RedisClient $redis,
@@ -125,10 +184,62 @@ final readonly class RedisQueue implements QueueInterface
     #[\Override]
     public function release(QueuedJob $job): void
     {
-        $this->removeFromProcessing($job);
+        /** @var string $oldPayload */
+        $oldPayload = $job->handle;
 
-        $payload = self::encode(['class' => $job->class, 'args' => $job->args], attempts: $job->attempts, maxAttempts: $job->maxAttempts, metadata: $job->metadata);
-        $this->redis->getList(self::pendingKey($job->queue))->pushHead($payload);
+        /** @var array{id?: string, pushedAt?: int} $oldEnvelope */
+        $oldEnvelope = json_decode($oldPayload, true, flags: JSON_THROW_ON_ERROR);
+
+        // id/pushedAt are preserved from the envelope being replaced, not
+        // regenerated — a fresh id only needs to be unique *between
+        // independent pushes* (see encode()'s own docblock, and this
+        // class's own docblock for why the delayed sorted set needs
+        // that). Regenerating it here would erase the job's logical
+        // identity and original enqueue time across every retry instead.
+        //
+        // Both are read with ?? null, not unconditionally: a job pushed
+        // by the pre-id envelope format (class/args/attempts/maxAttempts/
+        // metadata only, no id/pushedAt at all) is still a valid,
+        // poppable payload after an upgrade — release()ing one must not
+        // depend on a key that version never wrote. Falling through to
+        // encode()'s own fresh-id/fresh-pushedAt default the first time a
+        // legacy job is released is what a rolling upgrade needs: after
+        // that release, the job's envelope is the current format and
+        // every later retry preserves the id encode() generated then.
+        $newPayload = self::encode(
+            ['class' => $job->class, 'args' => $job->args],
+            attempts: $job->attempts,
+            maxAttempts: $job->maxAttempts,
+            metadata: $job->metadata,
+            id: $oldEnvelope['id'] ?? null,
+            pushedAt: $oldEnvelope['pushedAt'] ?? null,
+        );
+
+        // One Lua script, not a remove() call followed by a separate
+        // pushHead() — see this class's own docblock for why the two-command
+        // version could lose the job outright on a crash between them.
+        // The destination write is gated on LREM actually having found and
+        // removed $oldPayload: without that check, this is indivisible
+        // but not a valid *conditional* transition — a duplicate
+        // release() call with the same handle, or a client retry after a
+        // connection drop whose server-side outcome is unknown, would
+        // otherwise LPUSH a second replacement even though the source
+        // entry the caller thinks it's releasing is already gone.
+        $removed = $this->redis->eval(
+            <<<'LUA'
+            local removed = redis.call('LREM', KEYS[1], 1, ARGV[1])
+            if removed == 1 then
+                redis.call('LPUSH', KEYS[2], ARGV[2])
+            end
+            return removed
+            LUA,
+            [self::processingKey($job->queue), self::pendingKey($job->queue)],
+            [$oldPayload, $newPayload],
+        );
+
+        if ($removed !== 1) {
+            throw StaleJobHandleException::forRelease($job->queue);
+        }
     }
 
     #[\Override]
@@ -167,41 +278,60 @@ final readonly class RedisQueue implements QueueInterface
     }
 
     /**
-     * @param array{class: class-string, args: array<string, mixed>} $serialized
-     */
-    /**
+     * A fresh `id` is generated only when $id is omitted — push() relies
+     * on that default, since a fresh id per *independent* push is what
+     * keeps two envelopes with byte-identical job data from ever becoming
+     * the same string (see this class's own docblock for why that matters
+     * specifically for the delayed sorted set, whose members must be
+     * unique). release() instead passes the id/pushedAt it read back off
+     * the envelope being replaced: uniqueness only ever needed to hold
+     * between independent pushes, not across retries of the same job, and
+     * regenerating it on every retry would erase the job's own logical
+     * identity and original enqueue time for no benefit.
+     *
      * @param array{class: class-string, args: array<string, mixed>} $serialized
      * @param array<string, string> $metadata
      */
-    private static function encode(array $serialized, int $attempts, ?int $maxAttempts, array $metadata = []): string
+    private static function encode(array $serialized, int $attempts, ?int $maxAttempts, array $metadata = [], ?string $id = null, ?int $pushedAt = null): string
     {
-        return json_encode([...$serialized, 'attempts' => $attempts, 'maxAttempts' => $maxAttempts, 'metadata' => $metadata], JSON_THROW_ON_ERROR);
+        return json_encode([
+            'id' => $id ?? bin2hex(random_bytes(16)),
+            'pushedAt' => $pushedAt ?? time(),
+            ...$serialized,
+            'attempts' => $attempts,
+            'maxAttempts' => $maxAttempts,
+            'metadata' => $metadata,
+        ], JSON_THROW_ON_ERROR);
     }
 
     /**
-     * `getRangeByScore()` (a read) and `remove()` (a write) are two
-     * separate Redis commands, not one atomic operation — with N workers
-     * calling this concurrently, every one of them can independently read
-     * the same ready set before any of them has removed anything from it.
-     * `remove()` itself is still atomic per-call and returns the number of
-     * members it actually deleted (0 or 1 for a single member here), so
-     * checking that return value is what makes the *promotion* atomic:
-     * only the one worker whose own `remove()` call actually deleted the
-     * member ever pushes it onward. Every other worker's `remove()` on an
-     * already-gone member returns 0 and skips it — this is what fixes the
-     * bug where every delayed job ran once per polling worker instead of
-     * once total.
+     * One Lua script does the read (ZRANGEBYSCORE, bounded by
+     * DELAYED_PROMOTION_BATCH_SIZE — see that constant's own docblock)
+     * and every move (ZREM+LPUSH per ready member) as a single indivisible
+     * unit, rather than a read followed by separate remove-then-push
+     * commands per member — see this class's own docblock for why the
+     * split version could both double-process under concurrent workers
+     * and lose a job outright on a crash mid-loop. Redis executes one
+     * EVAL to completion before touching another command from any client,
+     * so two workers calling this concurrently are simply serialized by
+     * Redis itself: whichever one runs first moves its whole batch of
+     * ready members, and the second sees whatever's left (nothing, or
+     * the next batch) — no return-value check needed to tell which worker
+     * "won," the way the previous per-member version needed.
      */
     private function promoteDelayedJobs(string $queue): void
     {
-        $delayed = $this->redis->getSortedSet(self::delayedKey($queue));
-        $ready = $delayed->getRangeByScore(ScoreBoundary::negativeInfinity(), ScoreBoundary::inclusive((float) time()));
-
-        foreach ($ready as $payload) {
-            if ($delayed->remove($payload) > 0) {
-                $this->redis->getList(self::pendingKey($queue))->pushHead($payload);
-            }
-        }
+        $this->redis->eval(
+            <<<'LUA'
+            local ready = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', ARGV[1], 'LIMIT', 0, ARGV[2])
+            for _, member in ipairs(ready) do
+                redis.call('ZREM', KEYS[1], member)
+                redis.call('LPUSH', KEYS[2], member)
+            end
+            LUA,
+            [self::delayedKey($queue), self::pendingKey($queue)],
+            [(string) time(), (string) self::DELAYED_PROMOTION_BATCH_SIZE],
+        );
     }
 
     private static function pendingKey(string $queue): string
