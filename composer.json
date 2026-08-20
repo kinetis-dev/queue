@@ -10,9 +10,9 @@
     ],
     "require": {
         "php": "^8.4",
-        "kinetis/framework": "dev-main",
-        "kinetis/persistence": "dev-main",
-        "kinetis/cache-redis": "dev-main",
+        "kinetis/framework": "^1.28.1",
+        "kinetis/persistence": "^1.11.4",
+        "kinetis/cache-redis": "^1.2.1",
         "amphp/redis": "^2.0.4",
         "psr/container": "^2.0.2",
         "psr/log": "^3.0.2"
@@ -42,20 +42,6 @@
             "bootstrap": "Kinetis\\Queue\\PackageBootstrap"
         }
     },
-    "repositories": [
-        {
-            "type": "path",
-            "url": "../framework"
-        },
-        {
-            "type": "path",
-            "url": "../persistence"
-        },
-        {
-            "type": "path",
-            "url": "../cache-redis"
-        }
-    ],
     "config": {
         "sort-packages": true,
         "allow-plugins": {
