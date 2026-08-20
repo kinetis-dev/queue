@@ -10,7 +10,7 @@
     ],
     "require": {
         "php": "^8.4",
-        "kinetis/framework": "dev-main",
+        "kinetis/framework": "^1.28.3",
         "psr/container": "^2.0.2",
         "psr/log": "^3.0.2"
     },
@@ -39,12 +39,6 @@
             "bootstrap": "Kinetis\\Queue\\PackageBootstrap"
         }
     },
-    "repositories": [
-        {
-            "type": "path",
-            "url": "../framework"
-        }
-    ],
     "config": {
         "sort-packages": true,
         "allow-plugins": {
