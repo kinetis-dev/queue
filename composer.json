@@ -1,6 +1,6 @@
 {
     "name": "kinetis/queue",
-    "description": "A backend-agnostic background job queue for Kinetis — Redis and SQL (MySQL/Postgres) backends included, no fluent job-scheduling DSL.",
+    "description": "A backend-agnostic background job queue for Kinetis — no fluent job-scheduling DSL. Redis, SQL, SQS, and RabbitMQ backends each live in their own separate package.",
     "type": "library",
     "license": "MIT",
     "authors": [
@@ -11,9 +11,6 @@
     "require": {
         "php": "^8.4",
         "kinetis/framework": "dev-main",
-        "kinetis/persistence": "dev-main",
-        "kinetis/cache-redis": "dev-main",
-        "amphp/redis": "^2.0.4",
         "psr/container": "^2.0.2",
         "psr/log": "^3.0.2"
     },
@@ -46,14 +43,6 @@
         {
             "type": "path",
             "url": "../framework"
-        },
-        {
-            "type": "path",
-            "url": "../persistence"
-        },
-        {
-            "type": "path",
-            "url": "../cache-redis"
         }
     ],
     "config": {

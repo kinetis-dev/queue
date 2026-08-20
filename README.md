@@ -18,14 +18,16 @@
 
 ---
 
-Redis and SQL (MySQL/Postgres) backends included, behind one
-`Kinetis\Queue\QueueInterface` — push a job from application code, a
+One `Kinetis\Queue\QueueInterface` — push a job from application code, a
 separate `kinetis queue:work` worker process pops and runs it. Named,
 priority-ordered queues, bounded retries (`maxAttempts`, defaulting to
 no retries at all), and named connections come built in. A job given up
 on is logged with its arguments, minus any constructor parameter marked
-`Kinetis\Queue\Attributes\Sensitive`. Amazon SQS is a
-third backend, in the separate `kinetis/queue-sqs`.
+`Kinetis\Queue\Attributes\Sensitive`. Every backend — Redis
+(`kinetis/queue-redis`), SQL (`kinetis/queue-sql`), Amazon SQS
+(`kinetis/queue-sqs`), and RabbitMQ (`kinetis/queue-rabbitmq`) — lives in
+its own separate package; this one carries only the contract, the
+worker, and the CLI commands.
 
 ```php
 use Kinetis\Queue\Job;
@@ -74,18 +76,19 @@ Nothing else — no routes, middleware, event listeners, or MCP tools.
 Read from the environment (or `.env`) via `Kinetis\Config` — by
 `kinetis queue:work` and by this package's bootstrap, which binds
 `QueueInterface` to the selected backend with no application wiring.
-The backend's own connection details come from the keys that backend
-already documents: `REDIS_*` (`kinetis/cache-redis`'s convention),
-`DB_*` (`kinetis/persistence`), or the `QUEUE_SQS_*`/`QUEUE_RABBITMQ_*`
-keys in `kinetis/queue-sqs`/`kinetis/queue-rabbitmq`.
+Each backend's own connection details are documented in that backend's
+own package (`kinetis/queue-redis`, `kinetis/queue-sql`,
+`kinetis/queue-sqs`, `kinetis/queue-rabbitmq`) — this package installs
+none of them, so picking `QUEUE_CONNECTION=redis` (say) without also
+`composer require kinetis/queue-redis` fails clearly, naming the
+package to install.
 
 | Key | Default | Purpose |
 |---|---|---|
-| `QUEUE_CONNECTION` | *(required)* | `redis`, `sql`, `sqs` (needs `kinetis/queue-sqs`), or `rabbitmq` (needs `kinetis/queue-rabbitmq`). |
-| `QUEUE_CONNECTION_NAME` | `default` | Which named `REDIS_*`/`DB_*` block the backend uses. |
+| `QUEUE_CONNECTION` | *(required)* | `redis`, `sql`, `sqs`, or `rabbitmq` — each needs its own package installed. |
+| `QUEUE_CONNECTION_NAME` | `default` | Which named connection block the backend uses. |
 | `QUEUE_MAX_ATTEMPTS` | `0` | Worker-level default attempts cap (`0` = no retries); a job's own `push(maxAttempts: ...)` wins. |
 | `QUEUE_POLL_TIMEOUT` | `5` | Seconds per `pop()` wait. |
-| `QUEUE_VISIBILITY_TIMEOUT_SECONDS` | — | SQL backend only (scoped): reclaim a crashed worker's reserved job after this long; unset means never. |
 
 Full reference across every package:
 [kinetis.dev/docs/config.html](https://kinetis.dev/docs/config.html).
