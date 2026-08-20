@@ -56,7 +56,7 @@ vendor/bin/kinetis queue:work --queue=high,default
 Installing this package is what opts it in — it registers the
 following automatically, through the `extra.kinetis` declaration in its
 `composer.json` (see
-[docs.kinetis.dev/cli.html](https://docs.kinetis.dev/cli.html)):
+[kinetis.dev/docs/cli.html](https://kinetis.dev/docs/cli.html)):
 
 - **Commands** on `vendor/bin/kinetis`: `queue:work` (the worker loop,
   stopping gracefully on SIGTERM once the job in flight finishes),
@@ -88,7 +88,7 @@ keys in `kinetis/queue-sqs`/`kinetis/queue-rabbitmq`.
 | `QUEUE_VISIBILITY_TIMEOUT_SECONDS` | — | SQL backend only (scoped): reclaim a crashed worker's reserved job after this long; unset means never. |
 
 Full reference across every package:
-[docs.kinetis.dev/config.html](https://docs.kinetis.dev/config.html).
+[kinetis.dev/docs/config.html](https://kinetis.dev/docs/config.html).
 
 ## Installation
 
@@ -97,7 +97,7 @@ composer require kinetis/queue
 ```
 
 Requires PHP 8.4+ and `kinetis/framework`. Full documentation:
-[docs.kinetis.dev/queue.html](https://docs.kinetis.dev/queue.html).
+[kinetis.dev/docs/queue.html](https://kinetis.dev/docs/queue.html).
 
 ## License
 
