@@ -89,7 +89,19 @@ final class SqlQueue implements QueueInterface
     public function __construct(
         private readonly SqlLink $db,
         private readonly ?int $visibilityTimeoutSeconds = null,
-    ) {}
+    ) {
+        // null means "no timeout" and is the only value with that
+        // meaning — 0 or a negative value would make reserveNext()'s own
+        // query match a row reserved an instant ago (0) or one reserved
+        // in the future relative to now (negative), letting a second
+        // worker reclaim an actively-held reservation immediately rather
+        // than after it genuinely goes stale.
+        if ($visibilityTimeoutSeconds !== null && $visibilityTimeoutSeconds < 1) {
+            throw new \InvalidArgumentException(
+                "SqlQueue needs a visibilityTimeoutSeconds of at least 1 (or null for no timeout), got {$visibilityTimeoutSeconds}.",
+            );
+        }
+    }
 
     #[\Override]
     public function push(Job $job, int $delaySeconds = 0, string $queue = 'default', ?int $maxAttempts = null): void
