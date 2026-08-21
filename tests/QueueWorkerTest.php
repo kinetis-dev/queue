@@ -5,12 +5,15 @@ declare(strict_types=1);
 namespace Kinetis\Queue\Tests;
 
 use Kinetis\Container\AppScope;
+use Kinetis\Events\EventListenerRegistry;
 use Kinetis\Queue\QueueWorker;
 use Kinetis\Queue\Tests\Fixtures\FailingJob;
 use Kinetis\Queue\Tests\Fixtures\InMemoryQueue;
+use Kinetis\Queue\Tests\Fixtures\QueueEventLog;
 use Kinetis\Queue\Tests\Fixtures\Recorder;
 use Kinetis\Queue\Tests\Fixtures\RecordingJob;
 use Kinetis\Queue\Tests\Fixtures\RecordingLogger;
+use Kinetis\Queue\Tests\Fixtures\RecordingQueueEventListener;
 use Kinetis\Queue\Tests\Fixtures\SensitiveFailingJob;
 use Psr\Log\LoggerInterface;
 use PHPUnit\Framework\TestCase;
@@ -34,6 +37,23 @@ final class QueueWorkerTest extends TestCase
         $app->boot();
 
         return $app;
+    }
+
+    /**
+     * @return array{0: AppScope, 1: QueueEventLog}
+     */
+    private function appWithEventLog(): array
+    {
+        $registry = new EventListenerRegistry();
+        $registry->register(RecordingQueueEventListener::class);
+        $log = new QueueEventLog();
+
+        $app = $this->app(static function (AppScope $app) use ($registry, $log): void {
+            $app->instance(EventListenerRegistry::class, $registry);
+            $app->instance(QueueEventLog::class, $log);
+        });
+
+        return [$app, $log];
     }
 
     public function test_processNext_returns_false_when_the_queue_is_empty(): void
@@ -357,5 +377,72 @@ final class QueueWorkerTest extends TestCase
         self::assertCount(1, $logger->entries);
         self::assertSame('reports', $logger->entries[0]['context']['job']['queue']);
         self::assertSame(1, $logger->entries[0]['context']['job']['attempts']);
+    }
+
+    public function test_a_successful_job_dispatches_job_succeeded(): void
+    {
+        [$app, $log] = $this->appWithEventLog();
+        $queue = new InMemoryQueue();
+        $queue->push(new RecordingJob('hello'), queue: 'reports');
+
+        (new QueueWorker($app, $queue))->processNext(queues: ['reports']);
+
+        self::assertCount(1, $log->succeeded);
+        self::assertSame(RecordingJob::class, $log->succeeded[0]->class);
+        self::assertSame('reports', $log->succeeded[0]->queue);
+        self::assertSame(1, $log->succeeded[0]->attempts);
+        self::assertSame([], $log->released);
+        self::assertSame([], $log->failedPermanently);
+    }
+
+    public function test_a_retried_job_dispatches_job_released(): void
+    {
+        [$app, $log] = $this->appWithEventLog();
+        $queue = new InMemoryQueue();
+        $queue->push(new FailingJob('deliberate failure'), maxAttempts: 2);
+
+        (new QueueWorker($app, $queue))->processNext();
+
+        self::assertCount(1, $log->released);
+        self::assertSame(FailingJob::class, $log->released[0]->class);
+        self::assertSame('default', $log->released[0]->queue);
+        self::assertSame(1, $log->released[0]->attempts);
+        self::assertInstanceOf(RuntimeException::class, $log->released[0]->exception);
+        self::assertSame('deliberate failure', $log->released[0]->exception->getMessage());
+        self::assertSame([], $log->succeeded);
+        self::assertSame([], $log->failedPermanently);
+    }
+
+    public function test_a_stale_release_does_not_dispatch_job_released(): void
+    {
+        [$app, $log] = $this->appWithEventLog();
+        $queue = new InMemoryQueue();
+        $queue->push(new FailingJob('deliberate failure'), maxAttempts: 2);
+        $queue->releaseShouldThrowStale = true;
+
+        (new QueueWorker($app, $queue))->processNext();
+
+        self::assertSame([], $log->released, 'the release() call made no actual change, so nothing genuine to report');
+    }
+
+    public function test_a_permanently_failed_job_dispatches_job_failed_permanently_with_redacted_args(): void
+    {
+        [$app, $log] = $this->appWithEventLog();
+        $queue = new InMemoryQueue();
+        $queue->push(new SensitiveFailingJob(4812, 'ana@example.com', 'not-a-real-token'), maxAttempts: 1);
+
+        (new QueueWorker($app, $queue))->processNext();
+
+        self::assertCount(1, $log->failedPermanently);
+        self::assertSame(SensitiveFailingJob::class, $log->failedPermanently[0]->class);
+        self::assertSame('default', $log->failedPermanently[0]->queue);
+        self::assertSame(1, $log->failedPermanently[0]->attempts);
+        self::assertInstanceOf(RuntimeException::class, $log->failedPermanently[0]->exception);
+        self::assertSame(
+            ['userId' => 4812, 'email' => '[redacted]', 'resetToken' => '[redacted]'],
+            $log->failedPermanently[0]->args,
+        );
+        self::assertSame([], $log->succeeded);
+        self::assertSame([], $log->released);
     }
 }

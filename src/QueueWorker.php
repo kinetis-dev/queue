@@ -6,6 +6,10 @@ namespace Kinetis\Queue;
 
 use Kinetis\Instrumentation\Telemetry;
 use Kinetis\Container\AppScope;
+use Kinetis\Events\EventDispatcher;
+use Kinetis\Queue\Events\JobFailedPermanently;
+use Kinetis\Queue\Events\JobReleased;
+use Kinetis\Queue\Events\JobSucceeded;
 use Kinetis\Queue\Exception\StaleJobHandleException;
 use Psr\Log\LoggerInterface;
 use Throwable;
@@ -154,6 +158,9 @@ final class QueueWorker
             JobInvoker::invoke($job, $scope);
             $this->queue->ack($queuedJob);
             $telemetry->jobFinished($jobToken, 'ack', null);
+            $scope->get(EventDispatcher::class)->dispatch(
+                new JobSucceeded($queuedJob->class, $queuedJob->queue, $queuedJob->attempts),
+            );
         } catch (Throwable $e) {
             $maxAttempts = $queuedJob->maxAttempts ?? $this->defaultMaxAttempts;
             $exhausted = $queuedJob->attempts >= $maxAttempts;
@@ -167,9 +174,14 @@ final class QueueWorker
             // A job that will be retried is still held by the backend with
             // its payload intact, so logging the arguments adds nothing
             // recoverable. They are the only surviving record once the job
-            // is given up on, and are redacted there per #[Sensitive].
-            if ($exhausted) {
-                $job['args'] = JobSerializer::redact($queuedJob->class, $queuedJob->args);
+            // is given up on, and are redacted there per #[Sensitive]. Kept
+            // as its own variable, not read back out of $job below, so
+            // there's no array key whose presence depends on $exhausted
+            // for the JobFailedPermanently dispatch to get wrong.
+            $redactedArgs = $exhausted ? JobSerializer::redact($queuedJob->class, $queuedJob->args) : null;
+
+            if ($redactedArgs !== null) {
+                $job['args'] = $redactedArgs;
             }
 
             $scope->get(LoggerInterface::class)->error(
@@ -182,9 +194,16 @@ final class QueueWorker
             if ($exhausted) {
                 $this->queue->fail($queuedJob);
                 $telemetry->jobFinished($jobToken, 'fail', $e);
+                /** @var array<string, mixed> $redactedArgs guaranteed non-null: $exhausted is true here */
+                $scope->get(EventDispatcher::class)->dispatch(
+                    new JobFailedPermanently($queuedJob->class, $queuedJob->queue, $queuedJob->attempts, $e, $redactedArgs),
+                );
             } else {
                 try {
                     $this->queue->release($queuedJob);
+                    $scope->get(EventDispatcher::class)->dispatch(
+                        new JobReleased($queuedJob->class, $queuedJob->queue, $queuedJob->attempts, $e),
+                    );
                 } catch (StaleJobHandleException) {
                     // Backend-specific (currently only RedisQueue), but a
                     // benign outcome regardless of which backend threw
@@ -197,7 +216,9 @@ final class QueueWorker
                     // way an unhandled Throwable from inside this catch
                     // block otherwise would, defeating the very
                     // "one bad job must not stop the loop" guarantee this
-                    // class exists to give every other job.
+                    // class exists to give every other job. No
+                    // JobReleased dispatch here either: this call made no
+                    // actual change, so there's nothing genuine to report.
                     $scope->get(LoggerInterface::class)->info(
                         "Job \"{$queuedJob->class}\" was already released through another call; nothing more to do.",
                     );

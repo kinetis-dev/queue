@@ -68,6 +68,12 @@ following automatically, through the `extra.kinetis` declaration in its
   bound to the selected backend before your own `bootstrap.php` runs —
   your registration wins on the same binding. Inert when
   `QUEUE_CONNECTION` is unset.
+- **Events**, dispatched by `queue:work` around every job's outcome —
+  register a `#[Listener]` for whichever one you need:
+  `Kinetis\Queue\Events\JobSucceeded`, `JobReleased` (a job failed but
+  will retry), and `JobFailedPermanently` (attempts exhausted). See
+  [kinetis.dev/docs/events.html](https://kinetis.dev/docs/events.html)
+  for the full list across every package.
 
 Nothing else — no routes, middleware, event listeners, or MCP tools.
 
