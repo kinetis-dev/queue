@@ -99,6 +99,9 @@ final class WireValue
      */
     private const int MAX_DEPTH = 32;
 
+    private const string AN_INSTANCE_OF = 'an instance of ';
+
+    // Never instantiated — every method here is static.
     private function __construct() {}
 
     public static function normalize(mixed $value, string $class, string $path): mixed
@@ -178,7 +181,7 @@ final class WireValue
             is_object($value) => throw UnserializableJobException::forUnsupportedValue(
                 $class,
                 $path,
-                'an instance of ' . $value::class . ' (raw objects are never already-normalized wire data)',
+                self::AN_INSTANCE_OF . $value::class . ' (raw objects are never already-normalized wire data)',
             ),
             default => throw UnserializableJobException::forUnsupportedValue($class, $path, 'an unsupported value'),
         };
@@ -360,7 +363,7 @@ final class WireValue
             is_object($value) => throw UnserializableJobException::forUnsupportedValue(
                 $class,
                 $path,
-                'an instance of ' . $value::class . ' (unsupported object type — only a BackedEnum case or a DateTimeImmutable instance is)',
+                self::AN_INSTANCE_OF . $value::class . ' (unsupported object type — only a BackedEnum case or a DateTimeImmutable instance is)',
             ),
             default => throw UnserializableJobException::forUnsupportedValue($class, $path, 'an unsupported value'),
         };
@@ -455,7 +458,7 @@ final class WireValue
             throw UnserializableJobException::forUnsupportedValue(
                 $class,
                 $path,
-                'an instance of ' . $value::class . ' (a DateTimeImmutable subclass — only the exact base class is supported)',
+                self::AN_INSTANCE_OF . $value::class . ' (a DateTimeImmutable subclass — only the exact base class is supported)',
             );
         }
 

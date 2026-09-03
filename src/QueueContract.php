@@ -60,6 +60,7 @@ final class QueueContract
 
     private const string VALID_NAME_PATTERN = '/^[A-Za-z0-9_-]{1,80}$/';
 
+    // Never instantiated — every method here is static.
     private function __construct() {}
 
     /**

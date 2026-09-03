@@ -60,6 +60,7 @@ use Kinetis\Queue\QueuedJob;
  */
 final class PopSweep
 {
+    // Never instantiated — every method here is static.
     private function __construct() {}
 
     /**
@@ -111,39 +112,31 @@ final class PopSweep
         $deadline = $timeoutSeconds > 0 ? $now() + $timeoutSeconds : null;
 
         while (true) {
-            foreach ($queues as $queue) {
-                $job = $probe($queue, 0.0);
+            $job = self::probeOnce($queues, $probe);
 
-                if ($job !== null) {
-                    return $job;
-                }
+            if ($job !== null) {
+                return $job;
             }
 
-            if ($deadline !== null && $now() >= $deadline) {
+            if (self::deadlineExceeded($deadline, $now)) {
                 return null;
             }
 
             if ($probeCanBlock) {
-                foreach ($queues as $queue) {
-                    if ($deadline !== null && $now() >= $deadline) {
-                        return null;
-                    }
+                $job = self::probeEachWithBoundedWait($queues, $probe, $deadline, $waitCapSeconds, $now);
 
-                    $remaining = $deadline !== null ? $deadline - $now() : $waitCapSeconds;
-                    $waitBudget = min($waitCapSeconds, $remaining);
-
-                    if ($waitBudget <= 0.0) {
-                        return null;
-                    }
-
-                    $job = $probe($queue, $waitBudget);
-
-                    if ($job !== null) {
-                        return $job;
-                    }
+                if ($job !== null) {
+                    return $job;
                 }
 
-                if ($deadline !== null && $now() >= $deadline) {
+                // Disambiguates, without any extra signal from the call
+                // above, why it came back empty: probeEachWithBoundedWait()
+                // returns null both when it genuinely finished every queue
+                // with nothing found and when the deadline cut it off
+                // partway through — this check alone tells the two apart
+                // correctly either way, since it's checking the exact
+                // same clock the call above was already racing against.
+                if (self::deadlineExceeded($deadline, $now)) {
                     return null;
                 }
             } else {
@@ -157,5 +150,81 @@ final class PopSweep
                 $sleep($sleepFor);
             }
         }
+    }
+
+    /**
+     * Genuinely impure — $now is a live clock, and its value changes
+     * between calls, especially once real time has passed inside a
+     * probeEachWithBoundedWait() blocking wait. PHPStan can't see that
+     * through a generic callable parameter, and without this tag treats
+     * a second call with the same $deadline as provably returning the
+     * same result as the first, which it doesn't.
+     *
+     * @phpstan-impure
+     */
+    private static function deadlineExceeded(?float $deadline, callable $now): bool
+    {
+        return $deadline !== null && $now() >= $deadline;
+    }
+
+    /**
+     * Phase 1 of every sweep: an immediate, non-blocking, priority-ordered
+     * probe of every queue — see the class docblock for why this alone is
+     * what fixes the "first queue consumes the whole budget" bug.
+     *
+     * @param list<string> $queues
+     * @param callable(string, float): (QueuedJob|null) $probe
+     */
+    private static function probeOnce(array $queues, callable $probe): ?QueuedJob
+    {
+        foreach ($queues as $queue) {
+            $job = $probe($queue, 0.0);
+
+            if ($job !== null) {
+                return $job;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Phase 2 of a sweep when the backend has a native blocking primitive
+     * to offer it to: one bounded wait per queue, in priority order, each
+     * capped by both $waitCapSeconds and whatever remains of the overall
+     * deadline. Stops and returns null the instant either is exhausted,
+     * rather than trying a later queue with an already-negative budget.
+     *
+     * @param list<string> $queues
+     * @param callable(string, float): (QueuedJob|null) $probe
+     * @param callable(): float $now
+     */
+    private static function probeEachWithBoundedWait(
+        array $queues,
+        callable $probe,
+        ?float $deadline,
+        float $waitCapSeconds,
+        callable $now,
+    ): ?QueuedJob {
+        foreach ($queues as $queue) {
+            if (self::deadlineExceeded($deadline, $now)) {
+                return null;
+            }
+
+            $remaining = $deadline !== null ? $deadline - $now() : $waitCapSeconds;
+            $waitBudget = min($waitCapSeconds, $remaining);
+
+            if ($waitBudget <= 0.0) {
+                return null;
+            }
+
+            $job = $probe($queue, $waitBudget);
+
+            if ($job !== null) {
+                return $job;
+            }
+        }
+
+        return null;
     }
 }
