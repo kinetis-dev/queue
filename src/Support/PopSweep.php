@@ -122,34 +122,61 @@ final class PopSweep
                 return null;
             }
 
-            if ($probeCanBlock) {
-                $job = self::probeEachWithBoundedWait($queues, $probe, $deadline, $waitCapSeconds, $now);
+            $outcome = self::advanceOneSweep($queues, $probe, $probeCanBlock, $deadline, $waitCapSeconds, $sleep, $now);
 
-                if ($job !== null) {
-                    return $job;
-                }
+            if ($outcome['job'] !== null) {
+                return $outcome['job'];
+            }
 
-                // Disambiguates, without any extra signal from the call
-                // above, why it came back empty: probeEachWithBoundedWait()
-                // returns null both when it genuinely finished every queue
-                // with nothing found and when the deadline cut it off
-                // partway through — this check alone tells the two apart
-                // correctly either way, since it's checking the exact
-                // same clock the call above was already racing against.
-                if (self::deadlineExceeded($deadline, $now)) {
-                    return null;
-                }
-            } else {
-                $remaining = $deadline !== null ? $deadline - $now() : $waitCapSeconds;
-                $sleepFor = min($waitCapSeconds, max(0.0, $remaining));
-
-                if ($sleepFor <= 0.0) {
-                    return null;
-                }
-
-                $sleep($sleepFor);
+            if ($outcome['stop']) {
+                return null;
             }
         }
+    }
+
+    /**
+     * Everything run()'s own loop does beyond the immediate non-blocking
+     * probe: either a blocking per-queue wait ($probeCanBlock) or an
+     * inter-sweep sleep, followed by deciding whether run() should try
+     * another full sweep or give up.
+     *
+     * $job is null both when probeEachWithBoundedWait() genuinely
+     * finished every queue with nothing found and when the deadline cut
+     * it off partway through — $stop is what disambiguates those two
+     * null cases for the caller, checking the exact same clock the wait
+     * above was already racing against.
+     *
+     * @param list<string> $queues
+     * @param callable(string, float): (QueuedJob|null) $probe
+     * @param callable(float): void $sleep
+     * @param callable(): float $now
+     * @return array{job: ?QueuedJob, stop: bool}
+     */
+    private static function advanceOneSweep(
+        array $queues,
+        callable $probe,
+        bool $probeCanBlock,
+        ?float $deadline,
+        float $waitCapSeconds,
+        callable $sleep,
+        callable $now,
+    ): array {
+        if ($probeCanBlock) {
+            $job = self::probeEachWithBoundedWait($queues, $probe, $deadline, $waitCapSeconds, $now);
+
+            return ['job' => $job, 'stop' => $job === null && self::deadlineExceeded($deadline, $now)];
+        }
+
+        $remaining = $deadline !== null ? $deadline - $now() : $waitCapSeconds;
+        $sleepFor = min($waitCapSeconds, max(0.0, $remaining));
+
+        if ($sleepFor <= 0.0) {
+            return ['job' => null, 'stop' => true];
+        }
+
+        $sleep($sleepFor);
+
+        return ['job' => null, 'stop' => false];
     }
 
     /**
