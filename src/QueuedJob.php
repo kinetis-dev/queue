@@ -25,6 +25,36 @@ namespace Kinetis\Queue;
  * QueueWorker::$defaultMaxAttempts. Both default here (1 and null) only
  * for direct test construction — a real pop() always sets both
  * explicitly.
+ *
+ * $queue is validated the same way every backend's own push()/pop()
+ * already validates a queue name — QueueContract::assertValidQueueName(),
+ * run here rather than trusted at every later use site. ack()/release()/
+ * fail() all read $job->queue to resolve backend storage the same way
+ * push()/pop() do (a Redis key segment, a SQL WHERE clause, an AMQP
+ * routing key, an SQS queue lookup), and QueuedJob's own constructor is
+ * public — there is no other single point every one of those paths
+ * passes through, since a caller (a test, a hand-rolled QueueInterface
+ * fake) can construct one directly rather than only ever receiving one
+ * back from a real pop(). Validating once, here, means every later use
+ * of $job->queue can trust it's already a real, well-formed name — no
+ * backend needs its own redundant check before touching ack()/release()/
+ * fail()'s own storage.
+ *
+ * $attempts and $maxAttempts are validated the identical way, for the
+ * identical reason: this constructor is the one point every backend's own
+ * pop() decoder passes through on the way to a real instance, and the one
+ * point a caller constructing one by hand (a test, a hand-rolled
+ * QueueInterface fake) passes through too. Without this, a durable
+ * backend's own corrupted or malformed stored data — an attempts count
+ * below the 1-indexed floor, a negative maxAttempts a lossy decode step
+ * failed to catch — could reach QueueWorker directly, where
+ * `$queuedJob->attempts >= $maxAttempts` would misclassify a job's very
+ * first real attempt as already exhausted. QueueContract::
+ * assertValidAttempts()/assertValidMaxAttempts() are what a durable
+ * backend's own pop() decoder should already have satisfied via
+ * QueueContract::coerceStoredInteger() before ever reaching here — this
+ * is the safety net that catches it regardless of whether that happened,
+ * not the only place it's checked.
  */
 final readonly class QueuedJob
 {
@@ -47,5 +77,9 @@ final readonly class QueuedJob
          * @var array<string, string>
          */
         public array $metadata = [],
-    ) {}
+    ) {
+        QueueContract::assertValidQueueName($queue);
+        QueueContract::assertValidAttempts($attempts);
+        QueueContract::assertValidMaxAttempts($maxAttempts);
+    }
 }

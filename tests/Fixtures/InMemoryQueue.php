@@ -9,6 +9,7 @@ use Kinetis\Queue\Job;
 use Kinetis\Queue\JobSerializer;
 use Kinetis\Queue\QueuedJob;
 use Kinetis\Queue\QueueInterface;
+use RuntimeException;
 
 /**
  * A real, array-backed QueueInterface — no Redis, no database — so
@@ -44,6 +45,15 @@ final class InMemoryQueue implements QueueInterface
      */
     public bool $releaseShouldThrowStale = false;
 
+    /**
+     * Makes the next ack() call throw instead of actually acking — a
+     * real backend's own ack() can genuinely fail (a dropped connection,
+     * for one), needed to exercise the case where QueueWorker's own
+     * finally block is reached before the durable transition itself
+     * ever completes, not just after.
+     */
+    public bool $ackShouldThrow = false;
+
     public function push(Job $job, int $delaySeconds = 0, string $queue = 'default', ?int $maxAttempts = null): void
     {
         $this->pending[$queue][] = [...JobSerializer::serialize($job), 'attempts' => 0, 'maxAttempts' => $maxAttempts];
@@ -73,6 +83,12 @@ final class InMemoryQueue implements QueueInterface
 
     public function ack(QueuedJob $job): void
     {
+        if ($this->ackShouldThrow) {
+            $this->ackShouldThrow = false;
+
+            throw new RuntimeException('ack() itself failed');
+        }
+
         /** @var int $handle */
         $handle = $job->handle;
         $this->acked[] = $handle;

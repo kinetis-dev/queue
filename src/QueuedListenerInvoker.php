@@ -4,7 +4,9 @@ declare(strict_types=1);
 
 namespace Kinetis\Queue;
 
+use Kinetis\Container\RequestScope;
 use Kinetis\Events\ListenerInvokerInterface;
+use Kinetis\Queue\Support\NormalizedPayload;
 
 /**
  * Kinetis\Events\EventDispatcher routes a ShouldQueue listener's
@@ -14,13 +16,18 @@ use Kinetis\Events\ListenerInvokerInterface;
  * ListenerInvokerInterface, this package implements it, and core never
  * references kinetis/queue in any form.
  *
- * $listener is EventDispatcher's own already-resolved listener instance,
- * constructed with its own dependencies. It can't be pushed onto the
- * queue directly (a live object with resolved dependencies has nothing
- * serializable about it); InvokeListenerJob instead carries the
- * listener's class/method as plain strings and the event's own
- * serialized constructor data, via the same JobSerializer a real Job
- * uses, reconstructing both on the worker side later.
+ * $listenerClass is a class-string, not a resolved object: EventDispatcher
+ * checks the registry's own ShouldQueue flag before ever constructing a
+ * listener, so nothing about the listener — its constructor, any
+ * dependency it needs, anything a worker-only binding would supply — runs
+ * in this producer process at all. InvokeListenerJob carries the
+ * listener's class/method as plain strings and the event's own serialized
+ * constructor data, via the same JobSerializer a real Job uses,
+ * reconstructing and invoking the listener on the worker side later — see
+ * that class's own docblock, and its handle() specifically, for where the
+ * one and only construction happens. $scope is accepted only to satisfy
+ * the shared interface; nothing here needs it, since nothing here
+ * resolves anything.
  */
 final readonly class QueuedListenerInvoker implements ListenerInvokerInterface
 {
@@ -29,15 +36,15 @@ final readonly class QueuedListenerInvoker implements ListenerInvokerInterface
     ) {}
 
     #[\Override]
-    public function invoke(object $listener, string $method, object $event): void
+    public function invoke(string $listenerClass, string $method, object $event, RequestScope $scope): void
     {
         $serialized = JobSerializer::serialize($event);
 
         $this->queue->push(new InvokeListenerJob(
-            $listener::class,
+            $listenerClass,
             $method,
             $serialized['class'],
-            $serialized['args'],
+            new NormalizedPayload($serialized['args']),
         ));
     }
 }

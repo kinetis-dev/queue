@@ -24,13 +24,24 @@ use Kinetis\Queue\QueueWorker;
  * per-invocation scope; see BearerAuthMiddleware's identical pattern for
  * why this is never registered on AppScope directly) purely to reach the
  * booted application container QueueWorker hands each job.
+ *
+ * $output/$errorOutput are injectable (defaulting to STDOUT/STDERR) for
+ * testability against php://memory — the same pattern StatsCommand/
+ * ClearCommand already use.
  */
 final readonly class WorkCommand
 {
+    /**
+     * @param resource $output mixed, not resource, since PHP has no native
+     *     "resource" type and a readonly property requires one
+     * @param resource $errorOutput
+     */
     public function __construct(
         private RequestScope $scope,
         private QueueInterface $queue,
         private Config $config,
+        private mixed $output = STDOUT,
+        private mixed $errorOutput = STDERR,
     ) {}
 
     #[Command('queue:work', description: 'Run the queue worker loop. --queue=high,default sets priority order.')]
@@ -49,17 +60,23 @@ final readonly class WorkCommand
         // push(maxAttempts: ...) always overrides this.
         $defaultMaxAttempts = $this->config->int('QUEUE_MAX_ATTEMPTS', 0);
 
-        fwrite(STDOUT, 'Queue worker started, listening on: ' . implode(', ', $queues) . "\n");
+        // Both validated through QueueWorker's own shared assertions
+        // before any startup output — an invalid deployment must never
+        // print "started" (or the pcntl warning) and then fail.
+        QueueWorker::assertValidDefaultMaxAttempts($defaultMaxAttempts);
+        QueueWorker::assertValidPollTimeout($pollTimeoutSeconds);
+
+        fwrite($this->output, 'Queue worker started, listening on: ' . implode(', ', $queues) . "\n");
 
         if (!QueueWorker::supportsGracefulShutdown()) {
             fwrite(
-                STDERR,
+                $this->errorOutput,
                 "Warning: ext-pcntl is not loaded, so SIGTERM cannot stop this worker between jobs. "
                 . "A deploy will interrupt whatever job is running. Install pcntl to avoid that.\n",
             );
         }
         new QueueWorker($this->scope->appScope(), $this->queue, $defaultMaxAttempts)->run($pollTimeoutSeconds, $queues);
-        fwrite(STDOUT, "Queue worker stopped.\n");
+        fwrite($this->output, "Queue worker stopped.\n");
 
         return 0;
     }
