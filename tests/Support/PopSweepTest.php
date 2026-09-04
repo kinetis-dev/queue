@@ -468,16 +468,22 @@ final class PopSweepTest extends TestCase
     }
 
     /**
-     * @return list<array{float}>
+     * Each rejected value with the label the message has to report it as.
+     * The three non-finite ones are why the labels are pinned at all: a
+     * float cast is what renders them today, and a message that read
+     * `got .` or `got -1.#IND.` on some other build would be useless for
+     * the one input this check exists to catch.
+     *
+     * @return list<array{float, string}>
      */
     public static function invalidWaitCaps(): array
     {
         return [
-            'zero' => [0.0],
-            'negative' => [-1.0],
-            'NAN' => [NAN],
-            'INF' => [INF],
-            '-INF' => [-INF],
+            'zero' => [0.0, '0.0'],
+            'negative' => [-1.0, '-1.0'],
+            'NAN' => [NAN, 'NAN'],
+            'INF' => [INF, 'INF'],
+            '-INF' => [-INF, '-INF'],
         ];
     }
 
@@ -492,9 +498,10 @@ final class PopSweepTest extends TestCase
      * the probeCanBlock: true and probeCanBlock: false shapes.
      */
     #[DataProvider('invalidWaitCaps')]
-    public function test_a_non_positive_or_non_finite_wait_cap_is_rejected_for_a_blocking_backend(float $waitCapSeconds): void
+    public function test_a_non_positive_or_non_finite_wait_cap_is_rejected_for_a_blocking_backend(float $waitCapSeconds, string $reported): void
     {
         $this->expectException(InvalidPopSweepConfigurationException::class);
+        $this->expectExceptionMessage("got {$reported}.");
 
         PopSweep::run(
             timeoutSeconds: 5,
@@ -507,9 +514,10 @@ final class PopSweepTest extends TestCase
     }
 
     #[DataProvider('invalidWaitCaps')]
-    public function test_a_non_positive_or_non_finite_wait_cap_is_rejected_for_a_non_blocking_backend(float $waitCapSeconds): void
+    public function test_a_non_positive_or_non_finite_wait_cap_is_rejected_for_a_non_blocking_backend(float $waitCapSeconds, string $reported): void
     {
         $this->expectException(InvalidPopSweepConfigurationException::class);
+        $this->expectExceptionMessage("got {$reported}.");
 
         PopSweep::run(
             timeoutSeconds: 0,

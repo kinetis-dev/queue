@@ -6,12 +6,26 @@ namespace Kinetis\Queue;
 
 /**
  * A backend-agnostic handle to one dequeued job, returned by
- * QueueInterface::pop() and handed back to ack()/release() unmodified.
- * $handle is deliberately untyped/opaque to everything except the backend
- * that produced it — a Redis backend might stash the job's own serialized
- * payload there (needed to remove it from a processing list), a SQL
- * backend its row's primary key. QueueWorker never inspects $handle
- * itself, only passes it back.
+ * QueueInterface::pop() and handed back to ack()/release()/fail()
+ * unmodified. $handle is untyped and opaque to everything except the
+ * backend that produced it — a Redis backend might stash the job's own
+ * serialized payload there (needed to remove it from a processing
+ * list), a SQL backend its row's primary key, SQS its receipt handle.
+ * QueueWorker never inspects $handle itself, only passes it back.
+ *
+ * **$handle is a delivery receipt: it identifies one exact delivery of a
+ * job, not the logical job.** The same job body reaching a worker again
+ * — after a release(), or after a reservation expired and the backend
+ * handed the work to someone else — is a different delivery and carries
+ * a different $handle. That is what lets a backend answer a settlement
+ * precisely: a handle naming a reservation the backend still holds
+ * settles it, and a handle naming a delivery that is over settles
+ * nothing and raises Exception\StaleJobHandleException instead of
+ * acking, releasing or failing whatever delivery holds the job now.
+ * Every backend that can tell the two apart must do so rather than
+ * settle by job identity; one that cannot says which of its settlements
+ * are unfenced in its own docblock, since the difference is a caller's
+ * to know about, not to discover from a job running twice.
  *
  * $queue is required, not defaulted — every real QueuedJob genuinely came
  * from a specific named queue, there's no ambiguous case. ack()/release()

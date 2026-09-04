@@ -12,6 +12,13 @@ namespace Kinetis\Queue;
  * (RedisSimpleCache/NullSimpleCache) and MigrationRepositoryInterface
  * elsewhere in Kinetis.
  *
+ * Only operations every backend can deliver exactly as written live
+ * here. Anything a backend can merely approximate belongs to a separate
+ * capability interface the backends that do meet its contract declare —
+ * see ClearableQueueInterface, which owns clear() for that reason, and
+ * Kinetis\SimpleCache\AtomicCounterInterface for the same split against
+ * PSR-16.
+ *
  * $queue on push() and $queues on pop() are both appended last, not
  * inserted earlier in the parameter list — the same "never break an
  * existing positional call" discipline CorsMiddleware's
@@ -88,6 +95,12 @@ namespace Kinetis\Queue;
  * Amp\delay() between attempts) — the caller can't tell which is
  * happening underneath.
  *
+ * **ack(), release() and fail() settle one delivery, not one job.**
+ * QueuedJob::$handle is the receipt naming that delivery — see that
+ * class's own docblock for the contract, including when a backend
+ * answers a settlement with Exception\StaleJobHandleException because
+ * the delivery is over.
+ *
  * $maxAttempts on push() is a per-job override; null defers to the
  * processing QueueWorker's own $defaultMaxAttempts. QueuedJob::$attempts
  * (see that class) is the attempt number the current pop() represents;
@@ -162,14 +175,4 @@ interface QueueInterface
      * either way, not a value to branch on.
      */
     public function size(string $queue = 'default'): int;
-
-    /**
-     * Discards every job waiting on $queue, returning how many were
-     * removed. Jobs a worker has already reserved are untouched — they
-     * belong to that worker until it acks, releases, or fails them.
-     *
-     * Destructive and unrecoverable: there is no dead-letter copy to
-     * restore from.
-     */
-    public function clear(string $queue = 'default'): int;
 }

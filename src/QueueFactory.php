@@ -28,6 +28,17 @@ use Kinetis\Queue\Exception\QueueUnavailableException;
  * `QueueInterface`, the worker, the CLI commands, and this dispatcher —
  * an application wanting Redis or SQL installs `kinetis/queue-redis`/
  * `kinetis/queue-sql` explicitly, the same as SQS or RabbitMQ.
+ *
+ * The return type is `QueueInterface` — the contract every backend
+ * honors identically. Capabilities beyond it vary by backend and are
+ * declared by separate interfaces, so a caller needing one checks for it
+ * on the returned instance (`ClearableQueueInterface`, which
+ * `QUEUE_CONNECTION=sqs` does not satisfy) rather than assuming every
+ * backend has it. Each backend's own factory returns the narrowest
+ * type its backend declares, since a caller reaching one of those has
+ * already named the backend. `PackageBootstrap` binds each capability
+ * against the application's own resolved `QueueInterface`, not against
+ * what this class returns.
  */
 final class QueueFactory
 {

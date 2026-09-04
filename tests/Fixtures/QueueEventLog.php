@@ -6,6 +6,7 @@ namespace Kinetis\Queue\Tests\Fixtures;
 
 use Kinetis\Queue\Events\JobFailedPermanently;
 use Kinetis\Queue\Events\JobReleased;
+use Kinetis\Queue\Events\JobSettlementLost;
 use Kinetis\Queue\Events\JobSucceeded;
 
 final class QueueEventLog
@@ -18,4 +19,7 @@ final class QueueEventLog
 
     /** @var list<JobFailedPermanently> */
     public array $failedPermanently = [];
+
+    /** @var list<JobSettlementLost> */
+    public array $settlementLost = [];
 }

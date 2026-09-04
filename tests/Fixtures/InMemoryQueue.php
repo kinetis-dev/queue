@@ -4,11 +4,12 @@ declare(strict_types=1);
 
 namespace Kinetis\Queue\Tests\Fixtures;
 
+use Kinetis\Queue\ClearableQueueInterface;
 use Kinetis\Queue\Exception\StaleJobHandleException;
 use Kinetis\Queue\Job;
 use Kinetis\Queue\JobSerializer;
+use Kinetis\Queue\JobSettlement;
 use Kinetis\Queue\QueuedJob;
-use Kinetis\Queue\QueueInterface;
 use RuntimeException;
 
 /**
@@ -20,7 +21,7 @@ use RuntimeException;
  * backend-specific timing behavior to fake here, only FIFO order,
  * priority-by-queue-order, and ack/release bookkeeping.
  */
-final class InMemoryQueue implements QueueInterface
+final class InMemoryQueue implements ClearableQueueInterface
 {
     /** @var array<string, list<array{class: class-string<Job>, args: array<string, mixed>, attempts: int, maxAttempts: int|null}>> */
     private array $pending = [];
@@ -37,13 +38,17 @@ final class InMemoryQueue implements QueueInterface
     private int $nextHandle = 1;
 
     /**
-     * Makes the next release() call throw StaleJobHandleException instead
-     * of actually releasing — QueueWorker's own real backend
-     * (RedisQueue) can throw this when its conditional Lua transition
-     * finds the source entry already gone, and this fixture needs a way
-     * to exercise that path without a real Redis.
+     * Makes the next ack()/release()/fail() call throw
+     * StaleJobHandleException instead of settling — the answer a backend
+     * gives when the delivery a handle names is over (see QueuedJob).
+     * One flag per settlement, since QueueWorker reaches each of the
+     * three down a different path and has to handle all three.
      */
+    public bool $ackShouldThrowStale = false;
+
     public bool $releaseShouldThrowStale = false;
+
+    public bool $failShouldThrowStale = false;
 
     /**
      * Makes the next ack() call throw instead of actually acking — a
@@ -83,6 +88,12 @@ final class InMemoryQueue implements QueueInterface
 
     public function ack(QueuedJob $job): void
     {
+        if ($this->ackShouldThrowStale) {
+            $this->ackShouldThrowStale = false;
+
+            throw StaleJobHandleException::forSettlement(JobSettlement::Ack, $job->queue);
+        }
+
         if ($this->ackShouldThrow) {
             $this->ackShouldThrow = false;
 
@@ -99,7 +110,7 @@ final class InMemoryQueue implements QueueInterface
         if ($this->releaseShouldThrowStale) {
             $this->releaseShouldThrowStale = false;
 
-            throw StaleJobHandleException::forRelease($job->queue);
+            throw StaleJobHandleException::forSettlement(JobSettlement::Release, $job->queue);
         }
 
         /** @var int $handle */
@@ -115,6 +126,12 @@ final class InMemoryQueue implements QueueInterface
 
     public function fail(QueuedJob $job): void
     {
+        if ($this->failShouldThrowStale) {
+            $this->failShouldThrowStale = false;
+
+            throw StaleJobHandleException::forSettlement(JobSettlement::Fail, $job->queue);
+        }
+
         /** @var int $handle */
         $handle = $job->handle;
         $this->failed[] = $handle;

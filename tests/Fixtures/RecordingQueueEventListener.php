@@ -7,6 +7,7 @@ namespace Kinetis\Queue\Tests\Fixtures;
 use Kinetis\Events\Listener;
 use Kinetis\Queue\Events\JobFailedPermanently;
 use Kinetis\Queue\Events\JobReleased;
+use Kinetis\Queue\Events\JobSettlementLost;
 use Kinetis\Queue\Events\JobSucceeded;
 
 final readonly class RecordingQueueEventListener
@@ -31,5 +32,11 @@ final readonly class RecordingQueueEventListener
     public function onJobFailedPermanently(JobFailedPermanently $event): void
     {
         $this->log->failedPermanently[] = $event;
+    }
+
+    #[Listener]
+    public function onJobSettlementLost(JobSettlementLost $event): void
+    {
+        $this->log->settlementLost[] = $event;
     }
 }

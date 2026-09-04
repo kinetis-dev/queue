@@ -67,19 +67,86 @@ following automatically, through the `extra.kinetis` declaration in its
 - **Commands** on `vendor/bin/kinetis`: `queue:work` (the worker loop,
   stopping gracefully on SIGTERM once the job in flight finishes),
   `queue:stats` (how many jobs are waiting), and `queue:clear`
-  (discard waiting jobs, requires `--force`).
-- **Service binding**: with `QUEUE_CONNECTION` set, `QueueInterface` is
+  (discard waiting jobs, requires `--force`; refuses on a backend that
+  cannot clear — see below).
+- **Service bindings**: with `QUEUE_CONNECTION` set, `QueueInterface` is
   bound to the selected backend before your own `bootstrap.php` runs —
-  your registration wins on the same binding. Inert when
-  `QUEUE_CONNECTION` is unset.
+  your registration wins on the same binding — and both
+  `ClearableQueueInterface` and core's
+  `Kinetis\Events\ListenerInvokerInterface` are bound to whatever
+  `QueueInterface` finally resolves to, yours included. That last one is
+  what makes a listener marked `Kinetis\Events\ShouldQueue` actually
+  queue, with no second stanza to write. All three are built on first
+  use, so an application that never injects a queue builds no backend.
+  Inert when `QUEUE_CONNECTION` is unset, leaving core's synchronous
+  listener invoker in place.
 - **Events**, dispatched by `queue:work` around every job's outcome —
   register a `#[Listener]` for whichever one you need:
   `Kinetis\Queue\Events\JobSucceeded`, `JobReleased` (a job failed but
-  will retry), and `JobFailedPermanently` (attempts exhausted). See
+  will retry), `JobFailedPermanently` (attempts exhausted), and
+  `JobSettlementLost` (the backend refused the settlement because this
+  worker's delivery was already over). See
   [kinetis.dev/docs/events.html](https://kinetis.dev/docs/events.html)
   for the full list across every package.
 
 Nothing else — no routes, middleware, event listeners, or MCP tools.
+
+## Clearing is a separate capability
+
+`QueueInterface` carries only what every backend does identically.
+Discarding the jobs waiting on a queue is not one of those, so it lives
+on `Kinetis\Queue\ClearableQueueInterface`, which extends
+`QueueInterface` and is declared by `kinetis/queue-redis`,
+`kinetis/queue-sql`, `kinetis/queue-rabbitmq`, and `SyncQueue`. One
+instance still pushes, pops and reports size. `kinetis/queue-sqs` does not
+declare it: Amazon SQS has no operation that meets the contract, so an
+SQS queue is emptied through infrastructure instead — see that package's
+own README.
+
+```php
+use Kinetis\Queue\ClearableQueueInterface;
+
+final readonly class ImportsMaintenance
+{
+    public function __construct(
+        private ClearableQueueInterface $queue,
+    ) {}
+
+    public function discardPendingImports(): int
+    {
+        return $this->queue->clear('imports');
+    }
+}
+```
+
+Take `ClearableQueueInterface` where you clear, `QueueInterface`
+everywhere else. Resolving the capability against a backend that lacks
+it raises `Kinetis\Queue\Exception\QueueNotClearableException`, naming
+that backend. `queue:clear` holds the base contract, so it checks at
+runtime instead and exits 1 with the same wording, without touching a
+queue; it also validates every name in `--queue` as one list before
+clearing anything, so a mistyped or repeated name leaves the queues
+ahead of it in the list untouched.
+
+`clear()` returns what that call removed — a queue accepts pushes
+throughout, so it is never expected to match a `size()` taken alongside
+it. Reserved jobs are never removed and never counted.
+
+## A settlement is per delivery, not per job
+
+`QueuedJob::$handle` is a delivery receipt: it identifies one exact
+delivery, so the same job reaching a worker again after a retry or an
+expired reservation carries a different handle. A backend that can tell
+a live reservation from a finished delivery answers a settlement for the
+latter with `Kinetis\Queue\Exception\StaleJobHandleException` rather
+than settling somebody else's delivery.
+
+`queue:work` catches that on `ack()`, `release()` and `fail()` alike: the
+loop keeps running, none of the three outcome events fires — no durable
+transition happened — and `JobSettlementLost` plus a warning-level log
+line report the loss. Every other exception from a settlement propagates
+and stops the worker. Full detail:
+[kinetis.dev/docs/queue.html](https://kinetis.dev/docs/queue.html).
 
 ## Configuration
 

@@ -92,12 +92,4 @@ final class SequencedPopQueue implements QueueInterface
     {
         return \count($this->outcomes);
     }
-
-    public function clear(string $queue = 'default'): int
-    {
-        $count = \count($this->outcomes);
-        $this->outcomes = [];
-
-        return $count;
-    }
 }

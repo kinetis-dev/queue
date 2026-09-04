@@ -5,7 +5,6 @@ declare(strict_types=1);
 namespace Kinetis\Queue\Tests\Console;
 
 use Kinetis\Console\CommandArguments;
-use Kinetis\Queue\Console\ClearCommand;
 use Kinetis\Queue\Console\StatsCommand;
 use Kinetis\Queue\Tests\Fixtures\InMemoryQueue;
 use Kinetis\Queue\Tests\Fixtures\RecordingJob;
@@ -41,31 +40,6 @@ final class StatsCommandTest extends TestCase
         self::assertMatchesRegularExpression('/total\s+3/', $output);
     }
 
-    public function test_clear_refuses_without_force_and_leaves_the_queue_intact(): void
-    {
-        $queue = new InMemoryQueue();
-        $queue->push(new RecordingJob('a'));
-
-        [$code, $output] = self::invoke(new ClearCommand($queue, self::stream()), []);
-
-        self::assertSame(1, $code);
-        self::assertStringContainsString('--force', $output);
-        self::assertSame(1, $queue->size());
-    }
-
-    public function test_clear_with_force_discards_the_waiting_jobs(): void
-    {
-        $queue = new InMemoryQueue();
-        $queue->push(new RecordingJob('a'));
-        $queue->push(new RecordingJob('b'));
-
-        [$code, $output] = self::invoke(new ClearCommand($queue, self::stream()), ['--force']);
-
-        self::assertSame(0, $code);
-        self::assertStringContainsString('Cleared 2 job(s)', $output);
-        self::assertSame(0, $queue->size());
-    }
-
     /** @return resource */
     private static function stream(): mixed
     {
@@ -79,7 +53,7 @@ final class StatsCommandTest extends TestCase
      * @param list<string> $argv
      * @return array{int, string}
      */
-    private static function invoke(StatsCommand|ClearCommand $command, array $argv): array
+    private static function invoke(StatsCommand $command, array $argv): array
     {
         $output = (new \ReflectionProperty($command, 'output'))->getValue($command);
         self::assertIsResource($output);

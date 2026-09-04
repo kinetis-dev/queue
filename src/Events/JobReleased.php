@@ -9,10 +9,12 @@ use Throwable;
 /**
  * Dispatched by QueueWorker::processNext() when a job's handle() throws
  * but attempts hasn't yet reached the effective cap, so the job goes back
- * onto the queue for another try. Fires only for a genuine release — not
- * when QueueInterface::release() throws Exception\StaleJobHandleException,
- * since that means the transition already happened through another path
- * and this call made no change worth reporting.
+ * onto the queue for another try. Fires only once the backend has
+ * accepted that release. Where it answers with
+ * Exception\StaleJobHandleException instead, this worker wrote nothing —
+ * the delivery it held was settled elsewhere, or reclaimed after its
+ * reservation expired and handed on as another delivery — so
+ * JobSettlementLost is dispatched in place of this event.
  *
  * No job arguments here, unlike JobFailedPermanently: the payload is
  * still held by the backend at this point, so there's nothing this event

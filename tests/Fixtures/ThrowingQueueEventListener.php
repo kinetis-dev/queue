@@ -7,13 +7,14 @@ namespace Kinetis\Queue\Tests\Fixtures;
 use Kinetis\Events\Listener;
 use Kinetis\Queue\Events\JobFailedPermanently;
 use Kinetis\Queue\Events\JobReleased;
+use Kinetis\Queue\Events\JobSettlementLost;
 use Kinetis\Queue\Events\JobSucceeded;
 use RuntimeException;
 
 /**
  * Every lifecycle-event listener throws — proving a broken observer can
- * never affect the durable transition (ack()/release()/fail()) that
- * already happened before it ran, and can never crash the worker.
+ * never affect the outcome that was already settled, or already lost,
+ * before it ran, and can never crash the worker.
  */
 final class ThrowingQueueEventListener
 {
@@ -33,5 +34,11 @@ final class ThrowingQueueEventListener
     public function onJobFailedPermanently(JobFailedPermanently $event): void
     {
         throw new RuntimeException('JobFailedPermanently listener failed.');
+    }
+
+    #[Listener]
+    public function onJobSettlementLost(JobSettlementLost $event): void
+    {
+        throw new RuntimeException('JobSettlementLost listener failed.');
     }
 }
