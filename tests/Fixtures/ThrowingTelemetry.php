@@ -205,10 +205,14 @@ final class ThrowingTelemetry implements TelemetryInterface
         return 'real-token';
     }
 
+    /** @var list<?Throwable> */
+    public array $jobFinishedFailures = [];
+
     #[\Override]
     public function jobFinished(mixed $token, string $outcome, ?Throwable $failure): void
     {
         $this->calls[] = ['jobFinished', $outcome];
+        $this->jobFinishedFailures[] = $failure;
 
         if ($this->throwOnJobFinished) {
             throw new RuntimeException('The telemetry backend failed to finish a job span.');

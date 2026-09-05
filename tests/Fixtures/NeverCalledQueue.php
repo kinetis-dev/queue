@@ -52,10 +52,4 @@ final class NeverCalledQueue implements QueueInterface
     {
         throw new LogicException('The queue backend must not be touched.');
     }
-
-    #[\Override]
-    public function clear(string $queue = 'default'): int
-    {
-        throw new LogicException('The queue backend must not be touched.');
-    }
 }

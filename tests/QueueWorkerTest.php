@@ -10,7 +10,9 @@ use Kinetis\Instrumentation\NullTelemetry;
 use Kinetis\Instrumentation\Telemetry;
 use Kinetis\Queue\Exception\MalformedJobSettledException;
 use Kinetis\Queue\Exception\MalformedQueuedJobDataException;
+use Kinetis\Queue\Exception\StaleJobHandleException;
 use Kinetis\Queue\JobSerializer;
+use Kinetis\Queue\JobSettlement;
 use Kinetis\Queue\QueuedJob;
 use Kinetis\Queue\QueueWorker;
 use Kinetis\Queue\Tests\Fixtures\DisposalCallbackHolder;
@@ -257,17 +259,16 @@ final class QueueWorkerTest extends TestCase
     }
 
     /**
-     * A backend's release() can throw StaleJobHandleException when its
-     * own conditional transition finds the source entry already gone —
-     * a duplicate call, or a retry after a connection failure whose
-     * server-side outcome wasn't known at the time. The transition it
-     * wanted has already happened through another path, so the worker
-     * must treat this as a benign, already-achieved outcome rather than
-     * letting it escape processNext() uncaught and crash the loop —
-     * the same "one bad outcome must not stop a long-running process"
-     * guarantee this class already gives every other job.
+     * A backend answers a settlement with StaleJobHandleException when
+     * the delivery the handle names is over — settled through another
+     * call, or reclaimed once its reservation expired and handed on.
+     * Nothing this worker asked for was written, and another worker may
+     * be running the same job, so the loss is reported at warning level
+     * and the loop keeps serving: letting the exception escape
+     * processNext() would stop the loop for every job behind this one,
+     * the exact failure this class exists to prevent.
      */
-    public function test_a_stale_job_handle_on_release_does_not_crash_the_worker(): void
+    public function test_a_stale_release_does_not_crash_the_worker(): void
     {
         $logger = new RecordingLogger();
         $app = $this->app(static fn (AppScope $app) => $app->instance(LoggerInterface::class, $logger));
@@ -280,13 +281,95 @@ final class QueueWorkerTest extends TestCase
 
         self::assertTrue($worker->processNext());
         self::assertSame([], $queue->released, 'the fixture recorded no release since it threw instead');
+        self::assertSame([], $queue->acked);
+        self::assertSame([], $queue->failed, 'a lost settlement is never retried down another path');
 
-        $infoEntries = array_values(array_filter($logger->entries, static fn (array $entry): bool => $entry['level'] === 'info'));
-        self::assertCount(1, $infoEntries, 'a benign info-level note, not silence, and not another error');
-        self::assertStringContainsString('already released', $infoEntries[0]['message']);
+        $warnings = self::entriesAt($logger, 'warning');
+        self::assertCount(1, $warnings);
+        self::assertStringContainsString('lost its delivery before release()', $warnings[0]['message']);
+        self::assertSame('release', $warnings[0]['context']['settlement']);
+        self::assertSame(
+            ['class' => FailingJob::class, 'queue' => 'default', 'attempts' => 1],
+            $warnings[0]['context']['job'],
+        );
     }
 
-    public function test_a_stale_job_handle_on_release_does_not_stop_the_worker_from_processing_the_next_one(): void
+    public function test_a_stale_ack_does_not_crash_the_worker(): void
+    {
+        $logger = new RecordingLogger();
+        $app = $this->app(static fn (AppScope $app) => $app->instance(LoggerInterface::class, $logger));
+
+        $queue = new InMemoryQueue();
+        $queue->push(new RecordingJob('the job still ran'));
+        $queue->ackShouldThrowStale = true;
+
+        $worker = new QueueWorker($app, $queue);
+
+        self::assertTrue($worker->processNext());
+        self::assertSame(['the job still ran'], $app->get(Recorder::class)->messages);
+        self::assertSame([], $queue->acked);
+        self::assertSame([], $queue->released, 'losing the ack never turns a succeeded job into a retry');
+        self::assertSame([], $queue->failed);
+
+        $warnings = self::entriesAt($logger, 'warning');
+        self::assertCount(1, $warnings);
+        self::assertStringContainsString('lost its delivery before ack()', $warnings[0]['message']);
+        self::assertSame('ack', $warnings[0]['context']['settlement']);
+    }
+
+    public function test_a_stale_fail_does_not_crash_the_worker(): void
+    {
+        $logger = new RecordingLogger();
+        $app = $this->app(static fn (AppScope $app) => $app->instance(LoggerInterface::class, $logger));
+
+        $queue = new InMemoryQueue();
+        $queue->push(new FailingJob('deliberate failure'), maxAttempts: 1);
+        $queue->failShouldThrowStale = true;
+
+        $worker = new QueueWorker($app, $queue);
+
+        self::assertTrue($worker->processNext());
+        self::assertSame([], $queue->failed);
+        self::assertSame([], $queue->released);
+        self::assertSame([], $queue->acked);
+
+        $warnings = self::entriesAt($logger, 'warning');
+        self::assertCount(1, $warnings);
+        self::assertStringContainsString('lost its delivery before fail()', $warnings[0]['message']);
+        self::assertSame('fail', $warnings[0]['context']['settlement']);
+    }
+
+    public function test_a_stale_ack_does_not_stop_the_worker_from_processing_the_next_one(): void
+    {
+        $app = $this->app();
+        $queue = new InMemoryQueue();
+        $queue->push(new RecordingJob('first'));
+        $queue->push(new RecordingJob('still runs'));
+        $queue->ackShouldThrowStale = true;
+
+        $worker = new QueueWorker($app, $queue);
+        $worker->processNext();
+        $worker->processNext();
+
+        self::assertSame(['first', 'still runs'], $app->get(Recorder::class)->messages);
+    }
+
+    public function test_a_stale_fail_does_not_stop_the_worker_from_processing_the_next_one(): void
+    {
+        $app = $this->app();
+        $queue = new InMemoryQueue();
+        $queue->push(new FailingJob('boom'), maxAttempts: 1);
+        $queue->push(new RecordingJob('still runs'));
+        $queue->failShouldThrowStale = true;
+
+        $worker = new QueueWorker($app, $queue);
+        $worker->processNext();
+        $worker->processNext();
+
+        self::assertSame(['still runs'], $app->get(Recorder::class)->messages);
+    }
+
+    public function test_a_stale_release_does_not_stop_the_worker_from_processing_the_next_one(): void
     {
         $app = $this->app();
         $queue = new InMemoryQueue();
@@ -572,7 +655,14 @@ final class QueueWorkerTest extends TestCase
         self::assertSame([], $log->failedPermanently);
     }
 
-    public function test_a_stale_release_does_not_dispatch_job_released(): void
+    /**
+     * Each of JobSucceeded/JobReleased/JobFailedPermanently asserts a
+     * durable transition that a stale settlement did not make, so none
+     * of them may fire; JobSettlementLost carries what did happen,
+     * including the operation attempted and the backend's own rejection
+     * of it.
+     */
+    public function test_a_stale_release_dispatches_job_settlement_lost_instead_of_job_released(): void
     {
         [$app, $log] = $this->appWithEventLog();
         $queue = new InMemoryQueue();
@@ -581,7 +671,143 @@ final class QueueWorkerTest extends TestCase
 
         (new QueueWorker($app, $queue))->processNext();
 
-        self::assertSame([], $log->released, 'the release() call made no actual change, so nothing genuine to report');
+        self::assertSame([], $log->released);
+        self::assertSame([], $log->succeeded);
+        self::assertSame([], $log->failedPermanently);
+
+        self::assertCount(1, $log->settlementLost);
+        self::assertSame(FailingJob::class, $log->settlementLost[0]->class);
+        self::assertSame('default', $log->settlementLost[0]->queue);
+        self::assertSame(1, $log->settlementLost[0]->attempts);
+        self::assertSame(JobSettlement::Release, $log->settlementLost[0]->operation);
+        self::assertSame(JobSettlement::Release, $log->settlementLost[0]->stale->operation);
+        self::assertInstanceOf(RuntimeException::class, $log->settlementLost[0]->failure);
+        self::assertSame('deliberate failure', $log->settlementLost[0]->failure->getMessage());
+    }
+
+    public function test_a_stale_ack_dispatches_job_settlement_lost_instead_of_job_succeeded(): void
+    {
+        [$app, $log] = $this->appWithEventLog();
+        $queue = new InMemoryQueue();
+        $queue->push(new RecordingJob('hello'));
+        $queue->ackShouldThrowStale = true;
+
+        (new QueueWorker($app, $queue))->processNext();
+
+        self::assertSame([], $log->succeeded);
+        self::assertSame([], $log->released);
+        self::assertSame([], $log->failedPermanently);
+
+        self::assertCount(1, $log->settlementLost);
+        self::assertSame(RecordingJob::class, $log->settlementLost[0]->class);
+        self::assertSame(JobSettlement::Ack, $log->settlementLost[0]->operation);
+        self::assertNull(
+            $log->settlementLost[0]->failure,
+            'handle() returned — losing the delivery is not the job failing',
+        );
+    }
+
+    public function test_a_stale_fail_dispatches_job_settlement_lost_instead_of_job_failed_permanently(): void
+    {
+        [$app, $log] = $this->appWithEventLog();
+        $queue = new InMemoryQueue();
+        $queue->push(new FailingJob('deliberate failure'), maxAttempts: 1);
+        $queue->failShouldThrowStale = true;
+
+        (new QueueWorker($app, $queue))->processNext();
+
+        self::assertSame([], $log->failedPermanently);
+        self::assertSame([], $log->succeeded);
+        self::assertSame([], $log->released);
+
+        self::assertCount(1, $log->settlementLost);
+        self::assertSame(JobSettlement::Fail, $log->settlementLost[0]->operation);
+        self::assertInstanceOf(RuntimeException::class, $log->settlementLost[0]->failure);
+        self::assertSame('deliberate failure', $log->settlementLost[0]->failure->getMessage());
+    }
+
+    /**
+     * The job's span closes either way — an unclosed span is worse than
+     * one carrying the wrong exception. Which exception it carries is
+     * the distinction: a stale ack has no other failure to report, so
+     * the lost settlement is the failure; a stale release/fail keeps the
+     * job's own exception, which is what the span was opened to describe.
+     */
+    public function test_a_stale_ack_closes_telemetry_as_a_settlement_failure(): void
+    {
+        $telemetry = new ThrowingTelemetry();
+        Telemetry::global()->swap($telemetry);
+
+        $queue = new InMemoryQueue();
+        $queue->push(new RecordingJob('hello'));
+        $queue->ackShouldThrowStale = true;
+
+        (new QueueWorker($this->app(), $queue))->processNext();
+
+        self::assertSame([['jobStarted', RecordingJob::class], ['jobFinished', 'ack']], $telemetry->calls);
+        self::assertCount(1, $telemetry->jobFinishedFailures);
+        self::assertInstanceOf(StaleJobHandleException::class, $telemetry->jobFinishedFailures[0]);
+    }
+
+    public function test_a_stale_release_keeps_the_job_failure_as_the_telemetry_failure(): void
+    {
+        $telemetry = new ThrowingTelemetry();
+        Telemetry::global()->swap($telemetry);
+
+        $queue = new InMemoryQueue();
+        $queue->push(new FailingJob('deliberate failure'), maxAttempts: 2);
+        $queue->releaseShouldThrowStale = true;
+
+        (new QueueWorker($this->app(), $queue))->processNext();
+
+        self::assertSame([['jobStarted', FailingJob::class], ['jobFinished', 'release']], $telemetry->calls);
+        self::assertCount(1, $telemetry->jobFinishedFailures);
+        self::assertInstanceOf(RuntimeException::class, $telemetry->jobFinishedFailures[0]);
+        self::assertSame('deliberate failure', $telemetry->jobFinishedFailures[0]->getMessage());
+    }
+
+    public function test_a_stale_fail_keeps_the_job_failure_as_the_telemetry_failure(): void
+    {
+        $telemetry = new ThrowingTelemetry();
+        Telemetry::global()->swap($telemetry);
+
+        $queue = new InMemoryQueue();
+        $queue->push(new FailingJob('deliberate failure'), maxAttempts: 1);
+        $queue->failShouldThrowStale = true;
+
+        (new QueueWorker($this->app(), $queue))->processNext();
+
+        self::assertSame([['jobStarted', FailingJob::class], ['jobFinished', 'fail']], $telemetry->calls);
+        self::assertCount(1, $telemetry->jobFinishedFailures);
+        self::assertInstanceOf(RuntimeException::class, $telemetry->jobFinishedFailures[0]);
+        self::assertSame('deliberate failure', $telemetry->jobFinishedFailures[0]->getMessage());
+    }
+
+    /**
+     * A throwing listener on the lost-settlement path is contained the
+     * same way every other lifecycle listener is: reported through the
+     * logger, never escaping the worker.
+     */
+    public function test_a_throwing_job_settlement_lost_listener_does_not_escape_the_worker(): void
+    {
+        [$app, $logger] = $this->appWithThrowingListenerAndLogger();
+        $queue = new InMemoryQueue();
+        $queue->push(new RecordingJob('hello'));
+        $queue->ackShouldThrowStale = true;
+
+        self::assertTrue((new QueueWorker($app, $queue))->processNext());
+
+        $errors = self::entriesAt($logger, 'error');
+        self::assertCount(1, $errors);
+        self::assertStringContainsString('A JobSettlementLost listener failed', $errors[0]['message']);
+    }
+
+    /**
+     * @return list<array{level: mixed, message: string, context: array<string, mixed>}>
+     */
+    private static function entriesAt(RecordingLogger $logger, string $level): array
+    {
+        return array_values(array_filter($logger->entries, static fn (array $entry): bool => $entry['level'] === $level));
     }
 
     /**

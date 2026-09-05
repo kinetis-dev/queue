@@ -7,6 +7,7 @@ namespace Kinetis\Queue\Tests;
 use Kinetis\Container\AppScope;
 use Kinetis\Instrumentation\NullTelemetry;
 use Kinetis\Instrumentation\Telemetry;
+use Kinetis\Queue\ClearableQueueInterface;
 use Kinetis\Queue\Exception\InvalidDelaySecondsException;
 use Kinetis\Queue\Exception\InvalidMaxAttemptsException;
 use Kinetis\Queue\Exception\InvalidPopTimeoutException;
@@ -425,5 +426,25 @@ final class SyncQueueTest extends TestCase
 
         self::assertCount(1, $telemetry->jobPushEndedFailures);
         self::assertInstanceOf(UnserializableJobException::class, $telemetry->jobPushEndedFailures[0]);
+    }
+
+    public function test_the_backend_is_usable_through_the_clear_capability_type(): void
+    {
+        $queue = new SyncQueue($this->app());
+
+        self::assertInstanceOf(ClearableQueueInterface::class, $queue);
+
+        // Called through the capability type, not the concrete class: a
+        // backend that stopped declaring ClearableQueueInterface fails
+        // here as a TypeError instead of passing quietly. The queue-name
+        // check still throws rather than returning this backend's own 0.
+        $this->expectException(InvalidQueueNameException::class);
+        self::clearThrough($queue, '');
+    }
+
+    /** Typed as the capability, which is the whole point of the test above. */
+    private static function clearThrough(ClearableQueueInterface $queue, string $name): int
+    {
+        return $queue->clear($name);
     }
 }

@@ -69,6 +69,9 @@ use Throwable;
  * developer runs locally silently accepted a value every durable backend
  * rejects.
  *
+ * Clearing is supported (ClearableQueueInterface) and always reports 0:
+ * nothing is ever stored, so nothing is ever waiting to discard.
+ *
  * push() runs $job through JobSerializer::serialize() then
  * deserializeJob() before ever invoking it, exactly like every durable
  * backend does before storing/popping a payload — the reconstructed
@@ -81,7 +84,7 @@ use Throwable;
  * instead of silently working in development and only failing once
  * actually deployed against a durable backend.
  */
-final readonly class SyncQueue implements QueueInterface
+final readonly class SyncQueue implements ClearableQueueInterface
 {
     public function __construct(
         private AppScope $app,
@@ -194,6 +197,11 @@ final readonly class SyncQueue implements QueueInterface
         return 0;
     }
 
+    /**
+     * Nothing is ever waiting here, so there is never anything to
+     * discard — 0 is the exact count ClearableQueueInterface asks for,
+     * not a stand-in for an operation this backend cannot perform.
+     */
     #[\Override]
     public function clear(string $queue = 'default'): int
     {

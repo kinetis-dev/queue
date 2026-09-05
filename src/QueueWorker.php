@@ -12,6 +12,7 @@ use Kinetis\Container\TransactionGuardHook;
 use Kinetis\Events\EventDispatcher;
 use Kinetis\Queue\Events\JobFailedPermanently;
 use Kinetis\Queue\Events\JobReleased;
+use Kinetis\Queue\Events\JobSettlementLost;
 use Kinetis\Queue\Events\JobSucceeded;
 use Kinetis\Queue\Exception\MalformedJobSettledException;
 use Kinetis\Queue\Exception\StaleJobHandleException;
@@ -75,6 +76,15 @@ use Throwable;
  * logger reporting an observer's own failure can't escape either), and
  * never allowed to reclassify a success as a failure or escape
  * processNext() and stop the worker.
+ *
+ * A transition the backend rejects as stale — the delivery settled
+ * elsewhere, or reclaimed once its reservation expired — is caught on
+ * all three paths and routed through reportSettlementLost(): the loop
+ * continues, none of those three events fires, and
+ * Events\JobSettlementLost plus a warning report what happened. See that method for the full rule. Every other transport
+ * exception from ack()/release()/fail() propagates: a backend that is
+ * unreachable or refusing writes is not a settled job, and the loop
+ * stopping is the correct answer to it.
  *
  * $defaultMaxAttempts is the cap applied to a job that didn't set its own
  * at push() time (QueuedJob::$maxAttempts null) — a job's own
@@ -373,11 +383,17 @@ final class QueueWorker
      */
     private function handleSuccess(QueuedJob $queuedJob, RequestScope $scope, Telemetry $telemetry, mixed $jobToken): void
     {
-        $this->queue->ack($queuedJob);
+        try {
+            $this->queue->ack($queuedJob);
+        } catch (StaleJobHandleException $stale) {
+            $this->reportSettlementLost($queuedJob, JobSettlement::Ack, $stale, null, $scope, $telemetry, $jobToken);
+
+            return;
+        }
 
         $this->runBestEffort(
             static function () use ($telemetry, $jobToken): void {
-                $telemetry->jobFinished($jobToken, 'ack', null);
+                $telemetry->jobFinished($jobToken, JobSettlement::Ack->value, null);
             },
             fn (Throwable $notifyFailure) => $scope->get(LoggerInterface::class)->error(
                 "Recording telemetry for a succeeded job failed: {$notifyFailure->getMessage()}",
@@ -462,11 +478,17 @@ final class QueueWorker
         ));
 
         if ($exhausted) {
-            $this->queue->fail($queuedJob);
+            try {
+                $this->queue->fail($queuedJob);
+            } catch (StaleJobHandleException $stale) {
+                $this->reportSettlementLost($queuedJob, JobSettlement::Fail, $stale, $e, $scope, $telemetry, $jobToken);
+
+                return;
+            }
 
             $this->runBestEffort(
                 static function () use ($telemetry, $jobToken, $e): void {
-                    $telemetry->jobFinished($jobToken, 'fail', $e);
+                    $telemetry->jobFinished($jobToken, JobSettlement::Fail->value, $e);
                 },
                 fn (Throwable $notifyFailure) => $scope->get(LoggerInterface::class)->error(
                     "Recording telemetry for a permanently failed job failed: {$notifyFailure->getMessage()}",
@@ -488,48 +510,100 @@ final class QueueWorker
             return;
         }
 
-        $releasedNormally = true;
-
         try {
             $this->queue->release($queuedJob);
-        } catch (StaleJobHandleException) {
-            // Backend-specific (currently only RedisQueue), but a
-            // benign outcome regardless of which backend threw it: the
-            // transition this call wanted has already happened through
-            // another path — a duplicate release() call, or a retry
-            // after a connection drop whose server-side outcome wasn't
-            // known at the time it was made — so there's nothing left
-            // to do. Caught here specifically so it can't crash the
-            // worker the way an unhandled Throwable otherwise would,
-            // defeating the very "one bad job must not stop the loop"
-            // guarantee this class exists to give every other job. No
-            // JobReleased dispatch either: this call made no actual
-            // change, so there's nothing genuine to report.
-            $releasedNormally = false;
+        } catch (StaleJobHandleException $stale) {
+            $this->reportSettlementLost($queuedJob, JobSettlement::Release, $stale, $e, $scope, $telemetry, $jobToken);
 
-            $this->runBestEffort(fn (): mixed => $scope->get(LoggerInterface::class)->info(
-                "Job \"{$queuedJob->class}\" was already released through another call; nothing more to do.",
-            ));
-        }
-
-        if ($releasedNormally) {
-            $this->runBestEffort(
-                fn (): mixed => $scope->get(EventDispatcher::class)->dispatch(
-                    new JobReleased($queuedJob->class, $queuedJob->queue, $queuedJob->attempts, $e),
-                ),
-                fn (Throwable $notifyFailure) => $scope->get(LoggerInterface::class)->error(
-                    "A JobReleased listener failed for job \"{$queuedJob->class}\": {$notifyFailure->getMessage()}",
-                    ['exception' => $notifyFailure],
-                ),
-            );
+            return;
         }
 
         $this->runBestEffort(
+            fn (): mixed => $scope->get(EventDispatcher::class)->dispatch(
+                new JobReleased($queuedJob->class, $queuedJob->queue, $queuedJob->attempts, $e),
+            ),
+            fn (Throwable $notifyFailure) => $scope->get(LoggerInterface::class)->error(
+                "A JobReleased listener failed for job \"{$queuedJob->class}\": {$notifyFailure->getMessage()}",
+                ['exception' => $notifyFailure],
+            ),
+        );
+
+        $this->runBestEffort(
             static function () use ($telemetry, $jobToken, $e): void {
-                $telemetry->jobFinished($jobToken, 'release', $e);
+                $telemetry->jobFinished($jobToken, JobSettlement::Release->value, $e);
             },
             fn (Throwable $notifyFailure) => $scope->get(LoggerInterface::class)->error(
                 "Recording telemetry for a released job failed: {$notifyFailure->getMessage()}",
+                ['exception' => $notifyFailure],
+            ),
+        );
+    }
+
+    /**
+     * The path a settlement takes when the backend rejects it as stale:
+     * the delivery this worker held is over — settled through another
+     * call, or reclaimed after its reservation expired and handed on —
+     * so the ack()/release()/fail() this worker attempted wrote nothing.
+     *
+     * Three things follow from that, and this method is where all three
+     * are kept consistent. The loop continues, the same containment a
+     * throwing job already gets: losing a delivery is a normal
+     * consequence of at-least-once delivery, not a reason to stop
+     * serving every job behind it. No JobSucceeded/JobReleased/
+     * JobFailedPermanently is dispatched, because each of those asserts
+     * a durable transition that did not happen; JobSettlementLost says
+     * what did, and the warning-level log line says it to an operator
+     * who has no listener registered.
+     *
+     * Telemetry closes the job's span either way — an unclosed span is
+     * worse than one carrying the wrong exception. $failure is the job's
+     * own exception on the release/fail paths and null on the ack path,
+     * so a stale ack closes as a settlement failure carrying $stale
+     * while a stale release/fail keeps the job's own exception as the
+     * span's primary failure and reports the lost delivery through the
+     * event and the log instead. The outcome recorded is the settlement
+     * that was attempted, which is what the span was open for.
+     *
+     * $operation is what this worker attempted, taken from the call site
+     * rather than read back off $stale — the exception's own
+     * Exception\StaleJobHandleException::$operation is the backend's
+     * account of the same call, and the two are worth being able to
+     * compare.
+     */
+    private function reportSettlementLost(
+        QueuedJob $queuedJob,
+        JobSettlement $operation,
+        StaleJobHandleException $stale,
+        ?Throwable $failure,
+        RequestScope $scope,
+        Telemetry $telemetry,
+        mixed $jobToken,
+    ): void {
+        $this->runBestEffort(fn (): mixed => $scope->get(LoggerInterface::class)->warning(
+            "Job \"{$queuedJob->class}\" lost its delivery before {$operation->value}() could settle it: {$stale->getMessage()}",
+            [
+                'exception' => $stale,
+                'job' => ['class' => $queuedJob->class, 'queue' => $queuedJob->queue, 'attempts' => $queuedJob->attempts],
+                'settlement' => $operation->value,
+            ],
+        ));
+
+        $this->runBestEffort(
+            static function () use ($telemetry, $jobToken, $operation, $failure, $stale): void {
+                $telemetry->jobFinished($jobToken, $operation->value, $failure ?? $stale);
+            },
+            fn (Throwable $notifyFailure) => $scope->get(LoggerInterface::class)->error(
+                "Recording telemetry for a lost job settlement failed: {$notifyFailure->getMessage()}",
+                ['exception' => $notifyFailure],
+            ),
+        );
+
+        $this->runBestEffort(
+            fn (): mixed => $scope->get(EventDispatcher::class)->dispatch(
+                new JobSettlementLost($queuedJob->class, $queuedJob->queue, $queuedJob->attempts, $operation, $stale, $failure),
+            ),
+            fn (Throwable $notifyFailure) => $scope->get(LoggerInterface::class)->error(
+                "A JobSettlementLost listener failed for job \"{$queuedJob->class}\": {$notifyFailure->getMessage()}",
                 ['exception' => $notifyFailure],
             ),
         );
