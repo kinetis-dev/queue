@@ -7,68 +7,36 @@ namespace Kinetis\Queue;
 /**
  * A backend-agnostic handle to one dequeued job, returned by
  * QueueInterface::pop() and handed back to ack()/release()/fail()
- * unmodified. $handle is untyped and opaque to everything except the
- * backend that produced it — a Redis backend might stash the job's own
- * serialized payload there (needed to remove it from a processing
- * list), a SQL backend its row's primary key, SQS its receipt handle.
- * QueueWorker never inspects $handle itself, only passes it back.
+ * unmodified. $handle is opaque to everything except the backend that
+ * produced it — a serialized payload, a row plus the token of the
+ * reservation it came from, an SQS receipt handle, an AMQP delivery.
+ * QueueWorker only passes it back.
  *
- * **$handle is a delivery receipt: it identifies one exact delivery of a
- * job, not the logical job.** The same job body reaching a worker again
- * — after a release(), or after a reservation expired and the backend
- * handed the work to someone else — is a different delivery and carries
- * a different $handle. That is what lets a backend answer a settlement
- * precisely: a handle naming a reservation the backend still holds
- * settles it, and a handle naming a delivery that is over settles
- * nothing and raises Exception\StaleJobHandleException instead of
- * acking, releasing or failing whatever delivery holds the job now.
- * Every backend that can tell the two apart must do so rather than
- * settle by job identity; one that cannot says which of its settlements
- * are unfenced in its own docblock, since the difference is a caller's
- * to know about, not to discover from a job running twice.
+ * **$handle is a delivery receipt: it identifies one delivery of a job,
+ * not the logical job.** The same job body reaching a worker again —
+ * after a release(), or after a reservation expired — is a different
+ * delivery with a different $handle. That is what lets a backend settle
+ * precisely: a handle naming a reservation it still holds settles it, a
+ * handle naming a finished delivery settles nothing and raises
+ * Exception\StaleJobHandleException. A backend that cannot tell the two
+ * apart says which of its settlements are unfenced in its own docblock.
  *
- * $queue is required, not defaulted — every real QueuedJob genuinely came
- * from a specific named queue, there's no ambiguous case. ack()/release()
- * need it: both backends partition their own storage by queue name (a
- * Redis key prefix, a SQL column), so knowing which queue a job came from
- * is what lets ack()/release() find the right place to update.
+ * $queue is required, not defaulted: every real QueuedJob came from a
+ * named queue, and ack()/release()/fail() need it to find the right
+ * storage (a Redis key prefix, a SQL column, an AMQP routing key).
  *
- * $attempts is the attempt number this pop() represents (1-indexed:
- * 1 on the first attempt, 2 after one release(), and so on). $maxAttempts
- * is whatever was passed to push(); null defers to the worker's own
- * QueueWorker::$defaultMaxAttempts. Both default here (1 and null) only
- * for direct test construction — a real pop() always sets both
- * explicitly.
+ * $attempts is the attempt number this pop() represents, 1-indexed.
+ * $maxAttempts is whatever push() was given; null defers to
+ * QueueWorker::$defaultMaxAttempts. Both default here only for direct
+ * construction in a test — a real pop() always sets both.
  *
- * $queue is validated the same way every backend's own push()/pop()
- * already validates a queue name — QueueContract::assertValidQueueName(),
- * run here rather than trusted at every later use site. ack()/release()/
- * fail() all read $job->queue to resolve backend storage the same way
- * push()/pop() do (a Redis key segment, a SQL WHERE clause, an AMQP
- * routing key, an SQS queue lookup), and QueuedJob's own constructor is
- * public — there is no other single point every one of those paths
- * passes through, since a caller (a test, a hand-rolled QueueInterface
- * fake) can construct one directly rather than only ever receiving one
- * back from a real pop(). Validating once, here, means every later use
- * of $job->queue can trust it's already a real, well-formed name — no
- * backend needs its own redundant check before touching ack()/release()/
- * fail()'s own storage.
- *
- * $attempts and $maxAttempts are validated the identical way, for the
- * identical reason: this constructor is the one point every backend's own
- * pop() decoder passes through on the way to a real instance, and the one
- * point a caller constructing one by hand (a test, a hand-rolled
- * QueueInterface fake) passes through too. Without this, a durable
- * backend's own corrupted or malformed stored data — an attempts count
- * below the 1-indexed floor, a negative maxAttempts a lossy decode step
- * failed to catch — could reach QueueWorker directly, where
- * `$queuedJob->attempts >= $maxAttempts` would misclassify a job's very
- * first real attempt as already exhausted. QueueContract::
- * assertValidAttempts()/assertValidMaxAttempts() are what a durable
- * backend's own pop() decoder should already have satisfied via
- * QueueContract::coerceStoredInteger() before ever reaching here — this
- * is the safety net that catches it regardless of whether that happened,
- * not the only place it's checked.
+ * The constructor validates all three. It is the one point every
+ * backend's decoder and every hand-built fake passes through, so
+ * corrupted stored data — an attempts count below the 1-indexed floor, a
+ * negative maxAttempts — cannot reach QueueWorker, where
+ * `$attempts >= $maxAttempts` would misread a first attempt as already
+ * exhausted. A durable backend's decoder should already have satisfied
+ * these via QueueContract; this is the net that catches it either way.
  */
 final readonly class QueuedJob
 {
@@ -84,8 +52,8 @@ final readonly class QueuedJob
         public int $attempts = 1,
         public ?int $maxAttempts = null,
         /**
-         * Opaque string metadata stored with the job at push time —
-         * the instrumentation propagation channel. Backends carry it
+         * Opaque string metadata stored with the job at push time — the
+         * instrumentation propagation channel. Backends carry it
          * verbatim; nothing in the queue layer interprets it.
          *
          * @var array<string, string>

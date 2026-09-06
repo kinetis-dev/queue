@@ -8,21 +8,17 @@ use RuntimeException;
 use Throwable;
 
 /**
- * Thrown by a durable backend's own pop() once it has reserved a message
- * that turned out to be malformed while being decoded into a QueuedJob —
- * by the time this is thrown, that message has already been settled
- * permanently using the same backend's own fail()-equivalent primitive
- * (an exact-payload LREM off Redis's processing list, a SQL row DELETE,
- * SQS's DeleteMessage, RabbitMQ's nack(requeue: false) — see
- * QueueContract::settleIfMalformed(), which every backend routes through
- * to produce this), so there is nothing left for a caller to do to the
- * message itself.
+ * A reserved message could not be decoded and has already been settled
+ * permanently by the backend that reserved it.
  *
- * QueueWorker catches this specifically — narrower than a blanket catch
- * around the whole pop() call — so an ordinary transport/infrastructure
- * failure (a dropped connection, a backend genuinely unreachable) still
- * propagates and stops the worker exactly as it always has, rather than
- * being silently treated as if it were a settled malformed job.
+ * Every durable backend reserves before it decodes, so a decode failure
+ * leaves a real reservation with nothing to release it. Settling first
+ * and reporting through this type is what stops a poison message from
+ * being stranded forever (backends with no reclaim mechanism) or
+ * replayed forever (backends that have one), since the same bytes fail
+ * the same way on every retry. QueueWorker catches this specifically,
+ * logs it, and moves on; a transport failure is a different type and
+ * still stops the worker.
  */
 final class MalformedJobSettledException extends RuntimeException
 {

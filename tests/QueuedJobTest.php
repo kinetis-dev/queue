@@ -4,9 +4,7 @@ declare(strict_types=1);
 
 namespace Kinetis\Queue\Tests;
 
-use Kinetis\Queue\Exception\InvalidAttemptsException;
-use Kinetis\Queue\Exception\InvalidMaxAttemptsException;
-use Kinetis\Queue\Exception\InvalidQueueNameException;
+use Kinetis\Queue\Exception\InvalidQueueArgumentException;
 use Kinetis\Queue\QueuedJob;
 use PHPUnit\Framework\TestCase;
 
@@ -35,14 +33,14 @@ final class QueuedJobTest extends TestCase
 
     public function test_an_empty_queue_name_is_rejected(): void
     {
-        $this->expectException(InvalidQueueNameException::class);
+        $this->expectException(InvalidQueueArgumentException::class);
 
         new QueuedJob('Fixture\\Job', [], handle: 'h', queue: '');
     }
 
     public function test_a_malformed_queue_name_is_rejected(): void
     {
-        $this->expectException(InvalidQueueNameException::class);
+        $this->expectException(InvalidQueueArgumentException::class);
 
         new QueuedJob('Fixture\\Job', [], handle: 'h', queue: 'has spaces');
     }
@@ -63,14 +61,14 @@ final class QueuedJobTest extends TestCase
 
     public function test_an_attempts_value_of_zero_is_rejected(): void
     {
-        $this->expectException(InvalidAttemptsException::class);
+        $this->expectException(InvalidQueueArgumentException::class);
 
         new QueuedJob('Fixture\\Job', [], handle: 'h', queue: 'default', attempts: 0);
     }
 
     public function test_a_negative_attempts_value_is_rejected(): void
     {
-        $this->expectException(InvalidAttemptsException::class);
+        $this->expectException(InvalidQueueArgumentException::class);
 
         new QueuedJob('Fixture\\Job', [], handle: 'h', queue: 'default', attempts: -1);
     }
@@ -91,7 +89,7 @@ final class QueuedJobTest extends TestCase
 
     public function test_a_negative_max_attempts_is_rejected(): void
     {
-        $this->expectException(InvalidMaxAttemptsException::class);
+        $this->expectException(InvalidQueueArgumentException::class);
 
         new QueuedJob('Fixture\\Job', [], handle: 'h', queue: 'default', maxAttempts: -1);
     }

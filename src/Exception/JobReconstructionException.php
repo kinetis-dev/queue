@@ -8,23 +8,16 @@ use RuntimeException;
 use Throwable;
 
 /**
- * JobSerializer::deserialize()/deserializeJob() couldn't rebuild an
- * object from a queue payload — schema drift (a job/event class renamed
- * a constructor parameter, or was deployed with a different signature
- * than the worker still running old code expects) is the realistic
- * cause, not a hostile payload: the queue is trusted infrastructure on
- * the database's own tier, not an input boundary, the same threat model
- * JobSerializer::deserialize()'s own docblock already states. This
- * exception exists so that drift becomes one stable, catchable type
- * naming the class/argument/location involved, instead of whatever raw
- * Error/TypeError PHP's own constructor call happens to throw with no
- * payload context at all.
+ * A stored payload names a class or arguments the current code no longer
+ * matches — schema drift between the process that pushed the job and the
+ * one popping it. Distinct from MalformedQueuedJobDataException, which is
+ * corrupted storage rather than a signature that moved.
  */
 final class JobReconstructionException extends RuntimeException
 {
     public static function classDoesNotExist(string $class): self
     {
-        return new self("Cannot reconstruct \"{$class}\": that class no longer exists — a real, if unlikely, sign of schema drift between the process that pushed this job and the one popping it.");
+        return new self("Cannot reconstruct \"{$class}\": that class no longer exists.");
     }
 
     public static function notAJob(string $class): self
@@ -34,25 +27,46 @@ final class JobReconstructionException extends RuntimeException
 
     public static function missingRequiredArgument(string $class, string $parameter): self
     {
-        return new self("Cannot reconstruct \"{$class}\": its constructor requires \"\${$parameter}\", which the stored payload does not carry — the class's constructor signature has likely changed since this payload was pushed.");
+        return new self("Cannot reconstruct \"{$class}\": its constructor requires \"\${$parameter}\", which the stored payload does not carry.");
     }
 
     public static function unknownArgument(string $class, string $parameter): self
     {
-        return new self("Cannot reconstruct \"{$class}\": the stored payload carries \"\${$parameter}\", which no longer matches any constructor parameter — the class's constructor signature has likely changed since this payload was pushed.");
+        return new self("Cannot reconstruct \"{$class}\": the stored payload carries \"\${$parameter}\", which matches no constructor parameter.");
     }
 
     /**
-     * $reason describes the tag's own shape, never any value it might
-     * carry.
+     * The stored value for $parameter cannot become the type that
+     * parameter declares — an enum case that no longer exists, an
+     * unparseable date string.
+     *
+     * Names the class and the argument and nothing else, with no
+     * previous exception: PHP's own "not a valid backing value" and
+     * date-parse messages quote the value they were handed, and that
+     * value can be a #[Sensitive] one on its way into a log line.
      */
-    public static function invalidWireValue(string $class, string $path, string $reason): self
+    public static function unrestorableArgument(string $class, string $parameter): self
     {
-        return new self("Cannot reconstruct \"{$class}\": the value at \"{$path}\" is {$reason}.");
+        return new self("Cannot reconstruct \"{$class}\": the stored value for \"\${$parameter}\" does not match the type that parameter declares.");
     }
 
     public static function constructionFailed(string $class, Throwable $previous): self
     {
         return new self("Cannot reconstruct \"{$class}\": its constructor threw — {$previous->getMessage()}", previous: $previous);
+    }
+
+    /**
+     * The same failure for a class whose supplied arguments include a
+     * #[Sensitive] one. A constructor validating what it was handed
+     * routinely quotes it, and both the message and the chained cause
+     * reach a log through QueueWorker, so neither is carried: the class
+     * name is the whole diagnostic.
+     */
+    public static function constructionFailedWithSensitiveArgument(string $class): self
+    {
+        return new self(
+            "Cannot reconstruct \"{$class}\": its constructor threw. The cause is withheld because an argument "
+            . 'is marked #[Sensitive].',
+        );
     }
 }

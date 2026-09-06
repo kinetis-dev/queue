@@ -8,25 +8,14 @@ use Kinetis\Queue\JobSettlement;
 use RuntimeException;
 
 /**
- * A settlement found no live reservation to act on: the delivery this
- * QueuedJob::$handle names is no longer the backend's — it was already
- * acked, released, or failed through another call, or reclaimed after
- * its reservation expired and handed to another worker.
+ * A settlement named a delivery the backend no longer holds — already
+ * settled through another call, or reclaimed once its reservation
+ * expired. Nothing was written.
  *
- * Raised by ack(), release() and fail() alike, carrying which of the
- * three was attempted in $operation. The state it reports is identical
- * in all three cases — nothing this call wanted is left to do, and
- * nothing it wanted was written — while what a caller reports about it
- * is not, which is why the operation travels with the exception rather
- * than being inferred from the call site that caught it. A backend
- * raises this only for a settlement it fences; see QueuedJob's own
- * docblock for the delivery-receipt contract the fence rests on, and
- * each backend's docblock for which of its settlements carry one.
- *
- * QueueWorker catches this on all three paths, keeps the loop running,
- * and reports the lost ownership through Events\JobSettlementLost rather
- * than the success/released/permanent-failure event the settlement would
- * have earned had it landed.
+ * A backend raises this only where it can actually tell one delivery
+ * from another; one that cannot says so in its own docblock rather than
+ * settling by job identity. QueueWorker treats it as a lost delivery,
+ * not a job failure.
  */
 final class StaleJobHandleException extends RuntimeException
 {

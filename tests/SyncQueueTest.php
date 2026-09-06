@@ -8,10 +8,7 @@ use Kinetis\Container\AppScope;
 use Kinetis\Instrumentation\NullTelemetry;
 use Kinetis\Instrumentation\Telemetry;
 use Kinetis\Queue\ClearableQueueInterface;
-use Kinetis\Queue\Exception\InvalidDelaySecondsException;
-use Kinetis\Queue\Exception\InvalidMaxAttemptsException;
-use Kinetis\Queue\Exception\InvalidPopTimeoutException;
-use Kinetis\Queue\Exception\InvalidQueueNameException;
+use Kinetis\Queue\Exception\InvalidQueueArgumentException;
 use Kinetis\Queue\Exception\UnserializableJobException;
 use Kinetis\Queue\QueuedJob;
 use Kinetis\Queue\SyncQueue;
@@ -284,7 +281,7 @@ final class SyncQueueTest extends TestCase
     {
         $queue = new SyncQueue($this->app());
 
-        $this->expectException(InvalidQueueNameException::class);
+        $this->expectException(InvalidQueueArgumentException::class);
         $queue->push(new RecordingJob('should never run'), queue: '');
     }
 
@@ -299,7 +296,7 @@ final class SyncQueueTest extends TestCase
     {
         $queue = new SyncQueue($this->app());
 
-        $this->expectException(InvalidDelaySecondsException::class);
+        $this->expectException(InvalidQueueArgumentException::class);
         $queue->push(new RecordingJob('should never run'), delaySeconds: -1);
     }
 
@@ -307,7 +304,7 @@ final class SyncQueueTest extends TestCase
     {
         $queue = new SyncQueue($this->app());
 
-        $this->expectException(InvalidMaxAttemptsException::class);
+        $this->expectException(InvalidQueueArgumentException::class);
         $queue->push(new RecordingJob('should never run'), maxAttempts: -1);
     }
 
@@ -327,7 +324,7 @@ final class SyncQueueTest extends TestCase
 
         $queue = new SyncQueue($this->app());
 
-        $this->expectException(InvalidDelaySecondsException::class);
+        $this->expectException(InvalidQueueArgumentException::class);
         $queue->push(new RecordingJob('should never run'), delaySeconds: -1);
     }
 
@@ -335,7 +332,7 @@ final class SyncQueueTest extends TestCase
     {
         $queue = new SyncQueue($this->app());
 
-        $this->expectException(InvalidPopTimeoutException::class);
+        $this->expectException(InvalidQueueArgumentException::class);
         $queue->pop(-1);
     }
 
@@ -343,7 +340,7 @@ final class SyncQueueTest extends TestCase
     {
         $queue = new SyncQueue($this->app());
 
-        $this->expectException(InvalidQueueNameException::class);
+        $this->expectException(InvalidQueueArgumentException::class);
         $queue->pop(0, ['default', 'default']);
     }
 
@@ -358,7 +355,7 @@ final class SyncQueueTest extends TestCase
     {
         $queue = new SyncQueue($this->app());
 
-        $this->expectException(InvalidQueueNameException::class);
+        $this->expectException(InvalidQueueArgumentException::class);
         $queue->size('');
     }
 
@@ -366,7 +363,7 @@ final class SyncQueueTest extends TestCase
     {
         $queue = new SyncQueue($this->app());
 
-        $this->expectException(InvalidQueueNameException::class);
+        $this->expectException(InvalidQueueArgumentException::class);
         $queue->clear('');
     }
 
@@ -438,7 +435,7 @@ final class SyncQueueTest extends TestCase
         // backend that stopped declaring ClearableQueueInterface fails
         // here as a TypeError instead of passing quietly. The queue-name
         // check still throws rather than returning this backend's own 0.
-        $this->expectException(InvalidQueueNameException::class);
+        $this->expectException(InvalidQueueArgumentException::class);
         self::clearThrough($queue, '');
     }
 

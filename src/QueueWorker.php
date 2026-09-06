@@ -5,11 +5,11 @@ declare(strict_types=1);
 namespace Kinetis\Queue;
 
 use InvalidArgumentException;
-use Kinetis\Instrumentation\Telemetry;
 use Kinetis\Container\AppScope;
 use Kinetis\Container\RequestScope;
 use Kinetis\Container\TransactionGuardHook;
 use Kinetis\Events\EventDispatcher;
+use Kinetis\Instrumentation\Telemetry;
 use Kinetis\Queue\Events\JobFailedPermanently;
 use Kinetis\Queue\Events\JobReleased;
 use Kinetis\Queue\Events\JobSettlementLost;
@@ -20,85 +20,51 @@ use Psr\Log\LoggerInterface;
 use Throwable;
 
 /**
- * Drives QueueInterface::pop()/ack()/release() in a loop — a fourth kind
- * of persistent-worker loop, the same shape as FrankenPhpAdapter's own
- * request loop, just consuming jobs instead of HTTP requests. One fresh
- * RequestScope per job, via the identical AppScope::createRequestScope()
- * a request gets, for the identical reason: a job's resolved dependencies
- * must not leak into the next job this same worker process picks up
- * later. gc_collect_cycles() runs after every job unconditionally — a
- * queue worker is a persistent process by definition, unlike Kernel,
- * which serves both persistent and boot-and-die runtimes and only forces
- * collection for the former.
+ * Drives QueueInterface::pop()/ack()/release()/fail() in a loop — a
+ * persistent-worker loop of the same shape as FrankenPhpAdapter's
+ * request loop, consuming jobs instead of HTTP requests.
  *
- * A job's handle() method is invoked via JobInvoker (reflection, not
- * through Job itself — see that interface's docblock for why it declares
- * no methods), the same invocation SyncQueue uses for its own inline
- * push().
+ * One fresh RequestScope per job, via the same
+ * AppScope::createRequestScope() a request gets, for the same reason: a
+ * job's resolved dependencies must not leak into the next job this
+ * process picks up. Each scope also runs
+ * {@see TransactionGuardHook::registerIfAvailable()}, so a job that opens
+ * a transaction and returns or throws without closing it does not leave
+ * it open into whatever runs next on the same connection. The scope is
+ * disposed and gc_collect_cycles() runs after every job — a queue worker
+ * is a persistent process by definition.
  *
- * Each job's RequestScope also runs
- * {@see TransactionGuardHook::registerIfAvailable()} — the same dispose
- * hook Kernel wires per HTTP request — so a job that opens a database
- * transaction (directly, or through a resolved TransactionGuard) and
- * returns or throws without closing it does not leave that transaction
- * open into whatever job this same pooled/native connection serves next.
+ * A job's handle() is invoked via JobInvoker, the same invocation
+ * SyncQueue uses for its inline push().
  *
- * A throwing job does not stop the loop or escape it — the same
- * "one bad unit of work must not crash a long-running process" reasoning
- * already applied to ExceptionHandlerMiddleware and McpServer's top-level
- * catch. It's logged either way; whether it's released back onto the
- * queue (retried) or given up on via QueueInterface::fail() depends on
- * whether QueuedJob::$attempts has reached the effective cap — either
- * way the worker moves on to the next job immediately, the decision is
- * never itself a reason to stop.
+ * **Each popped delivery gets exactly one durable transition.** Only the
+ * job itself — deserializeJob() plus invoke() — decides which:
+ * ack() when it returns, fail() when it throws with QueuedJob::$attempts
+ * at the effective cap, release() otherwise. Everything that merely
+ * observes that outcome (telemetry, the lifecycle events, the log lines)
+ * runs through runBestEffort(), so a throwing listener, a broken
+ * telemetry backend or a failing logger can never block a transition,
+ * cause a second one, or reclassify a success as a failure. The
+ * real-failure log line runs ahead of the transition, describing the
+ * outcome rather than deciding it, and is contained the same way.
  *
- * Only the job itself — JobSerializer::deserializeJob()/JobInvoker::invoke()
- * — decides the outcome, and each popped handle receives exactly one
- * durable transition (ack()/release()/fail()) based on it. Not every
- * containing call runs strictly *after* that transition: telemetry's own
- * jobStarted() necessarily runs before the job does, and on failure, the
- * real-failure log line runs ahead of release()/fail() too, describing
- * the outcome rather than deciding it. What matters isn't ordering but
- * containment — jobStarted() and the real-failure log line, before or
- * after the transition, run through runBestEffort(), so nothing in them
- * can ever block, delay, or replace the transition itself, and any
- * failure is reported through the logger. The JobSerializer::redact()
- * call preparing that log line's arguments is contained the same way in
- * spirit but not through runBestEffort() — it has its own dedicated
- * fail-closed try/catch, falling back to a fully-redacted argument map
- * on any reflection failure with no separate report of its own; the real
- * job failure is already what the surrounding log line exists to carry.
- * jobFinished() and the JobSucceeded/JobReleased/JobFailedPermanently
- * dispatch are strictly post-transition, and are the ones that could
- * otherwise trigger a second, contradictory transition —
- * a throwing listener or telemetry backend there is caught, reported
- * through the logger (itself run the same no-throw way, so a broken
- * logger reporting an observer's own failure can't escape either), and
- * never allowed to reclassify a success as a failure or escape
- * processNext() and stop the worker.
+ * A throwing job does not stop or escape the loop — the same "one bad
+ * unit of work must not crash a long-running process" reasoning behind
+ * ExceptionHandlerMiddleware. Neither does a transition the backend
+ * rejects as stale: the delivery is over, so no
+ * JobSucceeded/JobReleased/JobFailedPermanently is dispatched and
+ * Events\JobSettlementLost reports what actually happened. Every other
+ * exception from ack()/release()/fail() propagates — a backend refusing
+ * writes is not a settled job, and stopping is the correct answer.
  *
- * A transition the backend rejects as stale — the delivery settled
- * elsewhere, or reclaimed once its reservation expired — is caught on
- * all three paths and routed through reportSettlementLost(): the loop
- * continues, none of those three events fires, and
- * Events\JobSettlementLost plus a warning report what happened. See that method for the full rule. Every other transport
- * exception from ack()/release()/fail() propagates: a backend that is
- * unreachable or refusing writes is not a settled job, and the loop
- * stopping is the correct answer to it.
- *
- * $defaultMaxAttempts is the cap applied to a job that didn't set its own
- * at push() time (QueuedJob::$maxAttempts null) — a job's own
- * push(maxAttempts: ...) always wins. Non-nullable, defaulting to 0 (no
- * retries); the queue:work command reads its value from
- * QUEUE_MAX_ATTEMPTS.
+ * $defaultMaxAttempts is the cap for a job that set none at push() time;
+ * a job's own push(maxAttempts: ...) always wins. It defaults to 0 (no
+ * retries); queue:work reads it from QUEUE_MAX_ATTEMPTS.
  *
  * SIGTERM and SIGINT stop the loop after the job in flight finishes, so
- * a deploy or `docker compose restart` never kills a worker mid-job and
- * strands it in the backend's reserved/processing state. Kinetis leaves
- * process supervision itself to whatever already runs the worker —
- * Docker, systemd, Kubernetes — and every one of those sends SIGTERM
- * before SIGKILL, so cooperating with that signal is all the graceful
- * half of a restart needs.
+ * a deploy never kills a worker mid-job and strands it in the backend's
+ * reserved state. Process supervision itself is left to whatever runs
+ * the worker; Docker, systemd and Kubernetes all send SIGTERM first.
  */
 final class QueueWorker
 {
@@ -113,14 +79,10 @@ final class QueueWorker
     }
 
     /**
-     * The one place both this constructor and an external caller wanting
-     * to validate before any side effect of its own (queue:work prints a
-     * startup line and, when ext-pcntl is missing, a warning, both before
-     * ever constructing a QueueWorker — see WorkCommand) route through,
-     * so the invariant can never drift between the two call sites.
-     *
-     * 0 is the real, documented "no retries" default — a negative count
-     * has no meaning a job's own attempt-counting could act on.
+     * Exposed so queue:work can validate before printing its startup
+     * lines, and so the invariant cannot drift between the two call
+     * sites. 0 is the real "no retries" default; a negative count has no
+     * meaning attempt counting could act on.
      */
     public static function assertValidDefaultMaxAttempts(int $defaultMaxAttempts): void
     {
@@ -131,14 +93,8 @@ final class QueueWorker
 
     /**
      * Runs until stopped, one job at a time. Returns only after a
-     * shutdown signal (or a stop() call) and the job in flight at that
-     * point has finished.
-     *
-     * $pollTimeoutSeconds must be at least 1 — see
-     * assertValidPollTimeout()'s own docblock for why 0
-     * (QueueInterface::pop()'s own "block with no deadline at all"
-     * value) is rejected specifically here, even though it is a
-     * genuinely valid pop() timeout on its own.
+     * shutdown signal (or a stop() call) and the job in flight then has
+     * finished.
      *
      * @param list<string> $queues checked in priority order — see
      *     QueueInterface::pop()
@@ -155,36 +111,22 @@ final class QueueWorker
     }
 
     /**
-     * The same shared-validation shape as assertValidDefaultMaxAttempts()
-     * — one place run() and an external pre-flight caller (queue:work,
-     * via WorkCommand) both route through. Requires a finite, positive
-     * value — 0 or negative are both rejected, for two different
-     * reasons: QueueInterface::pop()'s own documented contract is that 0
-     * means block with *no deadline at all*, until something's
-     * available (see that interface's own docblock — this is
-     * deliberately unchanged there, and genuinely useful for a one-shot
-     * caller; see processNext()'s own docblock for why it stays
-     * reachable there). run()'s loop is different: it must periodically
-     * regain control between pop() calls specifically so it can observe
-     * a shutdown signal (see listenForShutdownSignals() — async signal
-     * dispatch sets $shouldStop without interrupting an in-flight call,
-     * so the loop only ever re-checks it once the current pop() call
-     * itself returns). Passing pop()'s own 0 straight through here would
-     * mean pop() never returns at all on an idle queue, permanently
-     * trapping the worker inside it — SIGTERM/SIGINT would set
-     * $shouldStop but the loop could never reach the check, defeating
-     * the exact graceful-shutdown guarantee this class exists to give,
-     * and forcing whatever supervises the process to escalate to
-     * SIGKILL instead. A finite positive value bounds how long that can
-     * ever take to at most one poll interval.
+     * run() needs a finite, positive timeout even though pop() itself
+     * documents 0 as "block with no deadline". Signal dispatch sets
+     * $shouldStop without interrupting an in-flight call, so the loop can
+     * only observe it once pop() returns; passing 0 through would trap
+     * the worker inside pop() on an idle queue and force supervision to
+     * escalate to SIGKILL. A positive value bounds that to one poll
+     * interval. Exposed for the same pre-flight reason as
+     * assertValidDefaultMaxAttempts().
      */
     public static function assertValidPollTimeout(int $pollTimeoutSeconds): void
     {
         if ($pollTimeoutSeconds < 1) {
             throw new InvalidArgumentException(
-                "\$pollTimeoutSeconds must be a finite, positive number of seconds so the worker can periodically "
-                . "regain control to observe a shutdown signal — 0 would block pop() indefinitely on an idle queue, "
-                . "trapping the worker until a job arrives. Got {$pollTimeoutSeconds}.",
+                "\$pollTimeoutSeconds must be a positive number of seconds so the worker can periodically regain "
+                . "control to observe a shutdown signal — 0 would block pop() indefinitely on an idle queue. "
+                . "Got {$pollTimeoutSeconds}.",
             );
         }
     }
@@ -204,14 +146,13 @@ final class QueueWorker
     }
 
     /**
-     * Whether this process can stop gracefully at all. ext-pcntl is a
-     * CLI-only extension and absent from the official PHP Docker images
-     * unless explicitly installed (`docker-php-ext-install pcntl`);
-     * without it there is no way to observe SIGTERM, so supervision can
-     * only kill the worker outright and whatever job was in flight is
-     * left for the backend's reclaim mechanism.
+     * Whether this process can stop gracefully at all. ext-pcntl is
+     * CLI-only and absent from the official PHP images unless installed
+     * (`docker-php-ext-install pcntl`); without it there is no way to
+     * observe SIGTERM, so supervision can only kill the worker outright
+     * and whatever job was in flight is left for the backend to reclaim.
      *
-     * Callers that can report this to an operator should — a worker
+     * Callers that can report this to an operator should: a worker
      * silently lacking graceful shutdown looks identical to one that has
      * it, right up to the deploy that truncates a job.
      */
@@ -221,10 +162,10 @@ final class QueueWorker
     }
 
     /**
-     * Async signal dispatch means a signal arriving mid-job sets the flag
+     * Async dispatch means a signal arriving mid-job sets the flag
      * without interrupting the job — the loop reads it once that job has
-     * been acked or released, which is what makes the shutdown safe
-     * rather than merely quick.
+     * been settled, which is what makes the shutdown safe rather than
+     * merely quick.
      */
     private function listenForShutdownSignals(): void
     {
@@ -242,18 +183,13 @@ final class QueueWorker
     }
 
     /**
-     * Processes at most one job, returning whether one was actually
-     * found — exposed separately from run() so a test (or a
-     * process-N-then-exit script) can drive exactly one iteration.
+     * Processes at most one job, returning whether one was found —
+     * exposed separately from run() so a test or a process-N-then-exit
+     * script can drive exactly one iteration.
      *
-     * Unlike run(), $pollTimeoutSeconds here is passed straight to
-     * QueueInterface::pop() with no extra floor of its own — a single
-     * call, not a loop a shutdown signal needs to interrupt, so 0 stays
-     * available and means exactly what pop() itself documents it to
-     * mean: an intentionally unbounded one-shot wait, blocking until a
-     * job exists with no deadline at all. See assertValidPollTimeout()'s
-     * own docblock for why run() requires a finite, positive value
-     * instead.
+     * $pollTimeoutSeconds is passed straight to pop() with no floor of
+     * its own: a single call is not a loop a shutdown signal needs to
+     * interrupt, so 0 stays available and means what pop() documents.
      *
      * @param list<string> $queues
      */
@@ -262,18 +198,11 @@ final class QueueWorker
         try {
             $queuedJob = $this->queue->pop($pollTimeoutSeconds, $queues);
         } catch (MalformedJobSettledException $malformed) {
-            // The backend has already permanently removed the poison
-            // message by the time this is thrown — see that exception's
-            // own docblock. Logged best-effort, from AppScope directly
-            // rather than a fresh RequestScope: there is no real
-            // QueuedJob here to run job-scoped work for, so creating one
-            // just to dispose of it immediately after would be pure
-            // overhead, and job telemetry/lifecycle events are
-            // deliberately not fired either — those describe a job that
-            // actually ran, which this one never did. Reported as one
-            // queue item consumed (true), the same signal a real
-            // processed job gives — a malformed message was genuinely
-            // found and dealt with, not "nothing was there."
+            // The backend has already removed the poison message. Logged
+            // from AppScope rather than a fresh RequestScope: no job ran,
+            // so there is nothing job-scoped to resolve and no lifecycle
+            // event to fire. Reported as one queue item consumed — a
+            // message was found and dealt with.
             $this->runBestEffort(fn (): mixed => $this->app->get(LoggerInterface::class)->warning(
                 $malformed->getMessage(),
                 ['exception' => $malformed->getPrevious()],
@@ -291,41 +220,38 @@ final class QueueWorker
         $telemetry = Telemetry::global();
 
         try {
-            // Best-effort, same as every other telemetry/event call in
-            // this class, and for the same reason: a throwing telemetry
-            // backend must not itself escape processNext() before the
-            // job has even run, which would leak this scope (dispose()
-            // below would never be reached) and leave the popped job
-            // with no transition at all. A failed start leaves $jobToken
-            // null — a harmless sentinel a real backend's own
-            // jobFinished() already treats as "nothing to finish" the
-            // same way NullTelemetry's own hooks do.
+            // A failed start leaves $jobToken null, which every telemetry
+            // backend's jobFinished() already treats as nothing to
+            // finish. Contained like every other observer: a throwing
+            // backend here would otherwise leak this scope and leave the
+            // popped job with no transition at all.
             $jobToken = null;
 
             $this->runBestEffort(
                 function () use ($telemetry, $queuedJob, &$jobToken): void {
                     $jobToken = $telemetry->jobStarted($queuedJob->class, $queuedJob->queue, $queuedJob->attempts, $queuedJob->metadata);
                 },
-                fn (Throwable $notifyFailure) => $scope->get(LoggerInterface::class)->error(
-                    "Starting telemetry for job \"{$queuedJob->class}\" failed: {$notifyFailure->getMessage()}",
-                    ['exception' => $notifyFailure],
-                ),
+                $scope,
+                "Starting telemetry for job \"{$queuedJob->class}\" failed",
             );
 
-            // Only this decides success vs. failure — nothing downstream
-            // (a transition, telemetry, a listener) ever gets a second
-            // say in the outcome.
             $failure = null;
 
             try {
-                $job = JobSerializer::deserializeJob($queuedJob->class, $queuedJob->args);
-                JobInvoker::invoke($job, $scope);
+                JobInvoker::invoke(JobSerializer::deserializeJob($queuedJob->class, $queuedJob->args), $scope);
             } catch (Throwable $e) {
                 $failure = $e;
             }
 
             if ($failure === null) {
-                $this->handleSuccess($queuedJob, $scope, $telemetry, $jobToken);
+                if ($this->transition(JobSettlement::Ack, $queuedJob, null, $scope, $telemetry, $jobToken)) {
+                    $this->dispatch(
+                        new JobSucceeded($queuedJob->class, $queuedJob->queue, $queuedJob->attempts),
+                        'JobSucceeded',
+                        $queuedJob,
+                        $scope,
+                    );
+                }
             } else {
                 $this->handleFailure($queuedJob, $failure, $scope, $telemetry, $jobToken);
             }
@@ -337,100 +263,15 @@ final class QueueWorker
     }
 
     /**
-     * Usually reached after the job's one durable transition
-     * (ack()/release()/fail()) has already happened — handleSuccess()/
-     * handleFailure() both complete before the finally block in
-     * processNext() ever reaches here. But not always: this finally is
-     * also reached if handleSuccess()/handleFailure() itself throws
-     * before completing that transition — a backend's own ack()/
-     * release()/fail() call failing, for one — in which case that
-     * exception is still propagating when this runs and there is no
-     * completed transition to speak of yet. Either way, a disposal
-     * failure here must never escape processNext() and stop the whole
-     * worker loop, must never trigger a second transition (nothing in
-     * this method ever touches $this->queue), and must never replace
-     * whatever exception is already in flight — this method itself
-     * never throws, so a PHP `finally` calling it can't silently do
-     * that regardless of which case applies. Logged through
-     * runBestEffort() — the same contained, no-throw path this class
-     * already uses for every other observer, and already safe against a
-     * throwing LoggerInterface *resolution*, not just a throwing
-     * logger, since the resolution happens inside the callback
-     * runBestEffort() itself wraps — resolving the logger from AppScope,
-     * not $scope: $scope is already disposed by the time this runs, so
-     * it can no longer resolve one safely.
-     */
-    private function disposeScope(RequestScope $scope, QueuedJob $queuedJob): void
-    {
-        try {
-            $scope->dispose();
-        } catch (Throwable $disposeFailure) {
-            $this->runBestEffort(
-                fn (): mixed => $this->app->get(LoggerInterface::class)->error(
-                    "Request scope disposal failed for job \"{$queuedJob->class}\" (queue: {$queuedJob->queue}, attempt: {$queuedJob->attempts}): {$disposeFailure->getMessage()}",
-                    ['exception' => $disposeFailure, 'job' => ['class' => $queuedJob->class, 'queue' => $queuedJob->queue, 'attempts' => $queuedJob->attempts]],
-                ),
-            );
-        } finally {
-            gc_collect_cycles();
-        }
-    }
-
-    /**
-     * The one durable transition for a job that ran to completion —
-     * ack() — followed by best-effort observation of that already-decided
-     * outcome, never a chance to revise it.
-     */
-    private function handleSuccess(QueuedJob $queuedJob, RequestScope $scope, Telemetry $telemetry, mixed $jobToken): void
-    {
-        try {
-            $this->queue->ack($queuedJob);
-        } catch (StaleJobHandleException $stale) {
-            $this->reportSettlementLost($queuedJob, JobSettlement::Ack, $stale, null, $scope, $telemetry, $jobToken);
-
-            return;
-        }
-
-        $this->runBestEffort(
-            static function () use ($telemetry, $jobToken): void {
-                $telemetry->jobFinished($jobToken, JobSettlement::Ack->value, null);
-            },
-            fn (Throwable $notifyFailure) => $scope->get(LoggerInterface::class)->error(
-                "Recording telemetry for a succeeded job failed: {$notifyFailure->getMessage()}",
-                ['exception' => $notifyFailure],
-            ),
-        );
-
-        $this->runBestEffort(
-            fn (): mixed => $scope->get(EventDispatcher::class)->dispatch(
-                new JobSucceeded($queuedJob->class, $queuedJob->queue, $queuedJob->attempts),
-            ),
-            fn (Throwable $notifyFailure) => $scope->get(LoggerInterface::class)->error(
-                "A JobSucceeded listener failed for job \"{$queuedJob->class}\": {$notifyFailure->getMessage()}",
-                ['exception' => $notifyFailure],
-            ),
-        );
-    }
-
-    /**
-     * The one durable transition for a job that threw — fail() once
-     * QueuedJob::$attempts has reached the effective cap, release()
-     * otherwise. Preparing to describe that outcome — the real-failure
-     * log line, and the JobSerializer::redact() call behind it — runs
-     * contained ahead of the transition, not after it, so neither can
-     * ever block fail()/release() from running; completion telemetry and
-     * the lifecycle-event dispatch follow the transition instead, the
-     * same shape handleSuccess() uses. $e, the job's own real exception,
-     * is what telemetry and the lifecycle event always carry; an
-     * observer's own failure is reported separately and never replaces
-     * it.
+     * Chooses fail() over release() once QueuedJob::$attempts has reached
+     * the effective cap, and describes the failure before either runs so
+     * a broken logger cannot block the transition.
      */
     private function handleFailure(QueuedJob $queuedJob, Throwable $e, RequestScope $scope, Telemetry $telemetry, mixed $jobToken): void
     {
-        $maxAttempts = $queuedJob->maxAttempts ?? $this->defaultMaxAttempts;
-        $exhausted = $queuedJob->attempts >= $maxAttempts;
+        $exhausted = $queuedJob->attempts >= ($queuedJob->maxAttempts ?? $this->defaultMaxAttempts);
 
-        $job = [
+        $context = [
             'class' => $queuedJob->class,
             'queue' => $queuedJob->queue,
             'attempts' => $queuedJob->attempts,
@@ -438,21 +279,12 @@ final class QueueWorker
 
         // A job that will be retried is still held by the backend with
         // its payload intact, so logging the arguments adds nothing
-        // recoverable. They are the only surviving record once the job
-        // is given up on, and are redacted there per #[Sensitive]. Kept
-        // as its own variable, not read back out of $job below, so
-        // there's no array key whose presence depends on $exhausted
-        // for the JobFailedPermanently dispatch to get wrong.
-        //
-        // Preparing this — not deciding the outcome, only describing it
-        // for logging/the lifecycle event — must never block fail()
-        // below: redact() already fails closed when $queuedJob->class no
-        // longer autoloads, but reflecting an autoloadable class can
-        // still throw for other reasons, and that failure must not
-        // propagate out of here before fail() has run. Falls back to the
-        // same fully-redacted shape redact() itself produces for its own
-        // fail-closed case, built with no reflection of its own so it
-        // can't fail the same way.
+        // recoverable. They are the only surviving record once the job is
+        // given up on, and are redacted there per #[Sensitive]. redact()
+        // already fails closed when the class no longer autoloads;
+        // reflecting one that does can still throw, and that must not
+        // reach the transition below, so it falls back to the same
+        // fully-redacted shape built without reflection.
         $redactedArgs = null;
 
         if ($exhausted) {
@@ -461,114 +293,84 @@ final class QueueWorker
             } catch (Throwable) {
                 $redactedArgs = array_fill_keys(array_keys($queuedJob->args), JobSerializer::REDACTED);
             }
+
+            $context['args'] = $redactedArgs;
         }
 
-        if ($redactedArgs !== null) {
-            $job['args'] = $redactedArgs;
-        }
-
-        // Logging the real failure is itself best-effort, run ahead of
-        // the transition below: a broken logger must not be able to
-        // block ack()/release()/fail() from ever running at all.
         $this->runBestEffort(fn (): mixed => $scope->get(LoggerInterface::class)->error(
             $exhausted
                 ? "Job \"{$queuedJob->class}\" failed permanently after {$queuedJob->attempts} attempt(s): {$e->getMessage()}"
                 : "Job \"{$queuedJob->class}\" failed (attempt {$queuedJob->attempts}): {$e->getMessage()}",
-            ['exception' => $e, 'job' => $job],
+            ['exception' => $e, 'job' => $context],
         ));
 
-        if ($exhausted) {
-            try {
-                $this->queue->fail($queuedJob);
-            } catch (StaleJobHandleException $stale) {
-                $this->reportSettlementLost($queuedJob, JobSettlement::Fail, $stale, $e, $scope, $telemetry, $jobToken);
+        $operation = $exhausted ? JobSettlement::Fail : JobSettlement::Release;
 
-                return;
-            }
-
-            $this->runBestEffort(
-                static function () use ($telemetry, $jobToken, $e): void {
-                    $telemetry->jobFinished($jobToken, JobSettlement::Fail->value, $e);
-                },
-                fn (Throwable $notifyFailure) => $scope->get(LoggerInterface::class)->error(
-                    "Recording telemetry for a permanently failed job failed: {$notifyFailure->getMessage()}",
-                    ['exception' => $notifyFailure],
-                ),
-            );
-
-            /** @var array<string, mixed> $redactedArgs guaranteed non-null: $exhausted is true here */
-            $this->runBestEffort(
-                fn (): mixed => $scope->get(EventDispatcher::class)->dispatch(
-                    new JobFailedPermanently($queuedJob->class, $queuedJob->queue, $queuedJob->attempts, $e, $redactedArgs),
-                ),
-                fn (Throwable $notifyFailure) => $scope->get(LoggerInterface::class)->error(
-                    "A JobFailedPermanently listener failed for job \"{$queuedJob->class}\": {$notifyFailure->getMessage()}",
-                    ['exception' => $notifyFailure],
-                ),
-            );
-
+        if (!$this->transition($operation, $queuedJob, $e, $scope, $telemetry, $jobToken)) {
             return;
         }
 
-        try {
-            $this->queue->release($queuedJob);
-        } catch (StaleJobHandleException $stale) {
-            $this->reportSettlementLost($queuedJob, JobSettlement::Release, $stale, $e, $scope, $telemetry, $jobToken);
-
-            return;
-        }
-
-        $this->runBestEffort(
-            fn (): mixed => $scope->get(EventDispatcher::class)->dispatch(
-                new JobReleased($queuedJob->class, $queuedJob->queue, $queuedJob->attempts, $e),
-            ),
-            fn (Throwable $notifyFailure) => $scope->get(LoggerInterface::class)->error(
-                "A JobReleased listener failed for job \"{$queuedJob->class}\": {$notifyFailure->getMessage()}",
-                ['exception' => $notifyFailure],
-            ),
-        );
-
-        $this->runBestEffort(
-            static function () use ($telemetry, $jobToken, $e): void {
-                $telemetry->jobFinished($jobToken, JobSettlement::Release->value, $e);
-            },
-            fn (Throwable $notifyFailure) => $scope->get(LoggerInterface::class)->error(
-                "Recording telemetry for a released job failed: {$notifyFailure->getMessage()}",
-                ['exception' => $notifyFailure],
-            ),
+        $this->dispatch(
+            $exhausted
+                ? new JobFailedPermanently($queuedJob->class, $queuedJob->queue, $queuedJob->attempts, $e, $redactedArgs ?? [])
+                : new JobReleased($queuedJob->class, $queuedJob->queue, $queuedJob->attempts, $e),
+            $exhausted ? 'JobFailedPermanently' : 'JobReleased',
+            $queuedJob,
+            $scope,
         );
     }
 
     /**
+     * The job's one durable transition, followed by the telemetry that
+     * closes its span. Returns whether the backend actually settled it:
+     * a transition rejected as stale wrote nothing, so no completion
+     * event may follow it — reportSettlementLost() takes over instead.
+     * Every other exception from ack()/release()/fail() propagates.
+     */
+    private function transition(
+        JobSettlement $operation,
+        QueuedJob $queuedJob,
+        ?Throwable $failure,
+        RequestScope $scope,
+        Telemetry $telemetry,
+        mixed $jobToken,
+    ): bool {
+        try {
+            match ($operation) {
+                JobSettlement::Ack => $this->queue->ack($queuedJob),
+                JobSettlement::Release => $this->queue->release($queuedJob),
+                JobSettlement::Fail => $this->queue->fail($queuedJob),
+            };
+        } catch (StaleJobHandleException $stale) {
+            $this->reportSettlementLost($queuedJob, $operation, $stale, $failure, $scope, $telemetry, $jobToken);
+
+            return false;
+        }
+
+        $this->recordFinished($telemetry, $jobToken, $operation, $failure, $scope);
+
+        return true;
+    }
+
+    /**
      * The path a settlement takes when the backend rejects it as stale:
-     * the delivery this worker held is over — settled through another
-     * call, or reclaimed after its reservation expired and handed on —
-     * so the ack()/release()/fail() this worker attempted wrote nothing.
+     * the delivery is over — settled through another call, or reclaimed
+     * after its reservation expired — so nothing was written.
      *
-     * Three things follow from that, and this method is where all three
-     * are kept consistent. The loop continues, the same containment a
-     * throwing job already gets: losing a delivery is a normal
-     * consequence of at-least-once delivery, not a reason to stop
-     * serving every job behind it. No JobSucceeded/JobReleased/
-     * JobFailedPermanently is dispatched, because each of those asserts
-     * a durable transition that did not happen; JobSettlementLost says
-     * what did, and the warning-level log line says it to an operator
-     * who has no listener registered.
+     * The loop continues, because losing a delivery is a normal
+     * consequence of at-least-once delivery rather than a reason to stop
+     * serving every job behind it. No completion event is dispatched,
+     * because each asserts a transition that did not happen;
+     * JobSettlementLost says what did, and a warning says it to an
+     * operator with no listener registered.
      *
-     * Telemetry closes the job's span either way — an unclosed span is
-     * worse than one carrying the wrong exception. $failure is the job's
-     * own exception on the release/fail paths and null on the ack path,
-     * so a stale ack closes as a settlement failure carrying $stale
-     * while a stale release/fail keeps the job's own exception as the
-     * span's primary failure and reports the lost delivery through the
-     * event and the log instead. The outcome recorded is the settlement
-     * that was attempted, which is what the span was open for.
-     *
-     * $operation is what this worker attempted, taken from the call site
-     * rather than read back off $stale — the exception's own
-     * Exception\StaleJobHandleException::$operation is the backend's
-     * account of the same call, and the two are worth being able to
-     * compare.
+     * Telemetry closes the span either way — an unclosed span is worse
+     * than one carrying the wrong exception. $failure is the job's own
+     * exception on the release/fail paths and null on the ack path, so a
+     * stale ack closes carrying $stale while a stale release/fail keeps
+     * the job's own exception as the span's failure. $operation is what
+     * this worker attempted, taken from the call site rather than read
+     * back off $stale, so the two accounts stay comparable.
      */
     private function reportSettlementLost(
         QueuedJob $queuedJob,
@@ -588,46 +390,85 @@ final class QueueWorker
             ],
         ));
 
-        $this->runBestEffort(
-            static function () use ($telemetry, $jobToken, $operation, $failure, $stale): void {
-                $telemetry->jobFinished($jobToken, $operation->value, $failure ?? $stale);
-            },
-            fn (Throwable $notifyFailure) => $scope->get(LoggerInterface::class)->error(
-                "Recording telemetry for a lost job settlement failed: {$notifyFailure->getMessage()}",
-                ['exception' => $notifyFailure],
-            ),
-        );
+        $this->recordFinished($telemetry, $jobToken, $operation, $failure ?? $stale, $scope);
 
+        $this->dispatch(
+            new JobSettlementLost($queuedJob->class, $queuedJob->queue, $queuedJob->attempts, $operation, $stale, $failure),
+            'JobSettlementLost',
+            $queuedJob,
+            $scope,
+        );
+    }
+
+    private function recordFinished(Telemetry $telemetry, mixed $jobToken, JobSettlement $operation, ?Throwable $failure, RequestScope $scope): void
+    {
         $this->runBestEffort(
-            fn (): mixed => $scope->get(EventDispatcher::class)->dispatch(
-                new JobSettlementLost($queuedJob->class, $queuedJob->queue, $queuedJob->attempts, $operation, $stale, $failure),
-            ),
-            fn (Throwable $notifyFailure) => $scope->get(LoggerInterface::class)->error(
-                "A JobSettlementLost listener failed for job \"{$queuedJob->class}\": {$notifyFailure->getMessage()}",
-                ['exception' => $notifyFailure],
-            ),
+            static function () use ($telemetry, $jobToken, $operation, $failure): void {
+                $telemetry->jobFinished($jobToken, $operation->value, $failure);
+            },
+            $scope,
+            "Recording telemetry for a job settled with {$operation->value}() failed",
+        );
+    }
+
+    private function dispatch(object $event, string $name, QueuedJob $queuedJob, RequestScope $scope): void
+    {
+        $this->runBestEffort(
+            fn (): mixed => $scope->get(EventDispatcher::class)->dispatch($event),
+            $scope,
+            "A {$name} listener failed for job \"{$queuedJob->class}\"",
         );
     }
 
     /**
-     * Runs $action, whose own failure must never affect a job's
-     * already-decided durable outcome. Any exception is caught and, when
-     * $report is given, reported through it — itself run the same
-     * no-throw way, so a broken logger reporting an observer's failure
-     * can't itself escape and look like a second job failure. Never
-     * rethrows, regardless of how many layers fail.
+     * Reached after the transition on the ordinary paths, and while an
+     * exception is still propagating if a transition itself failed. A
+     * disposal failure must never escape and stop the loop, never trigger
+     * a second transition (nothing here touches $this->queue), and never
+     * replace an exception already in flight — this method never throws,
+     * so a `finally` calling it cannot silently do that.
+     *
+     * The logger is resolved from AppScope, not $scope: $scope is already
+     * disposed by the time this runs.
+     */
+    private function disposeScope(RequestScope $scope, QueuedJob $queuedJob): void
+    {
+        try {
+            $scope->dispose();
+        } catch (Throwable $disposeFailure) {
+            $this->runBestEffort(
+                fn (): mixed => $this->app->get(LoggerInterface::class)->error(
+                    "Request scope disposal failed for job \"{$queuedJob->class}\" (queue: {$queuedJob->queue}, attempt: {$queuedJob->attempts}): {$disposeFailure->getMessage()}",
+                    ['exception' => $disposeFailure, 'job' => ['class' => $queuedJob->class, 'queue' => $queuedJob->queue, 'attempts' => $queuedJob->attempts]],
+                ),
+            );
+        } finally {
+            gc_collect_cycles();
+        }
+    }
+
+    /**
+     * Runs $action, whose failure must never affect a job's
+     * already-decided outcome. Any exception is caught and, when $scope
+     * and $description are given, reported through the scope's logger —
+     * itself run the same no-throw way, so a broken logger reporting an
+     * observer's failure cannot escape either.
      *
      * @param callable(): mixed $action
-     * @param (callable(Throwable): mixed)|null $report
      */
-    private function runBestEffort(callable $action, ?callable $report = null): void
+    private function runBestEffort(callable $action, ?RequestScope $scope = null, ?string $description = null): void
     {
         try {
             $action();
         } catch (Throwable $e) {
-            if ($report !== null) {
-                $this->runBestEffort(static fn (): mixed => $report($e));
+            if ($scope === null || $description === null) {
+                return;
             }
+
+            $this->runBestEffort(static fn (): mixed => $scope->get(LoggerInterface::class)->error(
+                "{$description}: {$e->getMessage()}",
+                ['exception' => $e],
+            ));
         }
     }
 }

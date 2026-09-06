@@ -50,10 +50,7 @@ final class QueuedListenerInvokerTest extends TestCase
         self::assertSame(TestListener::class, $queuedJob->args['listenerClass']);
         self::assertSame('onTestEvent', $queuedJob->args['method']);
         self::assertSame(TestEvent::class, $queuedJob->args['eventClass']);
-        self::assertSame(
-            ['$kinetisWireType' => 'normalizedPayload', 'wireArgs' => ['message' => 'hello']],
-            $queuedJob->args['eventArgs'],
-        );
+        self::assertSame(['message' => 'hello'], $queuedJob->args['eventArgs']);
     }
 
     /**
@@ -73,11 +70,11 @@ final class QueuedListenerInvokerTest extends TestCase
     }
 
     /**
-     * A BackedEnum case and a DateTimeImmutable — the same tagged rich
-     * types a Job's own constructor arguments support — carry through an
-     * event's own serialized data unchanged.
+     * A BackedEnum case and a DateTimeImmutable — the same rich types a
+     * Job's own constructor arguments support — reach the queue in the
+     * scalar form the event's own parameter types restore them from.
      */
-    public function test_invoke_preserves_a_tagged_rich_type_within_the_events_own_serialized_data(): void
+    public function test_invoke_writes_a_rich_event_argument_in_its_scalar_wire_form(): void
     {
         $queue = new InMemoryQueue();
         $invoker = new QueuedListenerInvoker($queue);
@@ -88,15 +85,10 @@ final class QueuedListenerInvokerTest extends TestCase
         $queuedJob = $queue->pop();
 
         self::assertNotNull($queuedJob);
-        $eventWireArgs = $queuedJob->args['eventArgs']['wireArgs'];
-
+        self::assertSame('high', $queuedJob->args['eventArgs']['priority']);
         self::assertSame(
-            ['$kinetisWireType' => 'enum', 'class' => Priority::class, 'value' => 'high'],
-            $eventWireArgs['priority'],
-        );
-        self::assertSame(
-            ['$kinetisWireType' => 'datetime', 'value' => $occurredAt->format('Y-m-d\TH:i:s.uP')],
-            $eventWireArgs['occurredAt'],
+            $occurredAt->format('Y-m-d\TH:i:s.uP'),
+            $queuedJob->args['eventArgs']['occurredAt'],
         );
     }
 }

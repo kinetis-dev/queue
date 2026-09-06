@@ -6,7 +6,6 @@ namespace Kinetis\Queue;
 
 use Kinetis\Container\RequestScope;
 use Kinetis\Events\ListenerInvokerInterface;
-use Kinetis\Queue\Support\NormalizedPayload;
 
 /**
  * Kinetis\Events\EventDispatcher routes a ShouldQueue listener's
@@ -44,7 +43,7 @@ final readonly class QueuedListenerInvoker implements ListenerInvokerInterface
             $listenerClass,
             $method,
             $serialized['class'],
-            new NormalizedPayload($serialized['args']),
+            $serialized['args'],
         ));
     }
 }

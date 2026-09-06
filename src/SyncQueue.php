@@ -14,75 +14,57 @@ use Throwable;
 
 /**
  * Runs a job's handle() immediately, inline, in push() itself — no
- * separate worker process needed, useful for local development. pop()
- * always returns null (nothing is ever actually stored); ack()/release()
- * are no-ops, since QueueWorker only ever calls them after a non-null
- * pop(), which never happens here.
+ * separate worker process, useful for local development. pop() always
+ * returns null (nothing is ever stored); ack()/release()/fail() are
+ * no-ops, since QueueWorker only calls them after a non-null pop().
  *
- * Not selectable via QUEUE_CONNECTION — there's nothing for a
- * worker process to do against a backend that never stores anything.
- * Construct and register it directly in your own application bootstrap
- * instead, typically gated on APP_ENV.
+ * Not selectable via QUEUE_CONNECTION — there is nothing for a worker
+ * process to do against a backend that never stores anything. Construct
+ * and register it in your own bootstrap instead, typically gated on
+ * APP_ENV.
  *
- * A fresh RequestScope per push() call, via the identical
- * AppScope::createRequestScope() QueueWorker uses for each job — not the
- * caller's own currently-active scope. Deliberate: a job genuinely queued
- * runs in a completely separate worker process later, with no shared
- * scope at all, so reusing the caller's own scope here would let a job
- * accidentally depend on request-scoped state that happens to be
- * reachable in development but would silently be absent in production.
+ * A fresh RequestScope per push(), via the same
+ * AppScope::createRequestScope() QueueWorker uses — not the caller's
+ * active scope. A queued job runs in a separate process with
+ * no shared scope, so reusing the caller's would let a job depend on
+ * request-scoped state that is reachable in development and absent in
+ * production.
  *
- * Unlike QueueWorker, a failing job's exception is not caught here — it
- * propagates to whatever called push(). QueueWorker swallows a job's
- * exception so one failure can't crash a long-running process handling
- * others behind it; that reasoning doesn't apply to a single inline call
- * with nothing queued behind it, and seeing the real error immediately is
- * the actual point of running jobs synchronously during development.
- *
- * Disposal precedence: if both the job and the scope's own disposal fail,
- * push() rethrows the job's exact exception — PHP's own `finally`
- * semantics would otherwise silently replace it with the disposal
- * failure, which is exactly the defect this class avoids. The disposal
- * failure is logged separately, best-effort, through SafeLogger (the
- * scope is already disposed by then, so the logger is resolved from
- * AppScope, not the scope itself) and otherwise discarded. If only
- * disposal fails, that failure genuinely is the outcome: it propagates
- * normally, and telemetry reflects it rather than a false success.
+ * Unlike QueueWorker, a failing job's exception is not caught: it
+ * propagates to whatever called push(). Swallowing it protects a
+ * long-running loop with other jobs behind it, which is not this case,
+ * and seeing the real error immediately is the point of running jobs
+ * synchronously.
  *
  * The scope still runs {@see TransactionGuardHook::registerIfAvailable()}
- * before invoking the job, the same as QueueWorker's own per-job scope —
- * a job that opens a transaction and throws before closing it gets
- * rolled back when this scope disposes, even though the exception is
- * about to propagate rather than being swallowed.
+ * before invoking the job, so a job that opens a transaction and throws
+ * is rolled back on disposal.
  *
- * $queue is accepted for interface compliance but has no effect — there's
- * only one place a job can go here (immediately), so a queue name has
- * nothing to partition. $delaySeconds/$maxAttempts are accepted for the
- * same reason and have no effect either — there's nothing to delay and no
- * retry here to cap, a failing job's exception propagates immediately
- * instead. All three are still validated via
- * QueueContract::assertValidPushArguments(), the identical check every
- * durable backend's own push() makes: a negative $delaySeconds/
- * $maxAttempts is a caller mistake regardless of which backend receives
- * it, and this class existing specifically to make local development
- * behave like production would be undermined if the one backend a
- * developer runs locally silently accepted a value every durable backend
- * rejects.
+ * Disposal precedence: if both the job and its scope's disposal fail,
+ * push() rethrows the job's own exception — PHP's `finally` semantics
+ * would otherwise replace it with the disposal failure. That failure is
+ * logged through SafeLogger (resolved from AppScope, since the scope is
+ * already disposed) and otherwise discarded. If only disposal fails, it
+ * is the outcome: it propagates, and telemetry reflects it rather than
+ * a false success.
  *
- * Clearing is supported (ClearableQueueInterface) and always reports 0:
- * nothing is ever stored, so nothing is ever waiting to discard.
+ * $queue, $delaySeconds and $maxAttempts are accepted for interface
+ * compliance and have no effect — there is nothing to partition, delay
+ * or retry. All three are still validated through
+ * QueueContract::assertValidPushArguments(), the same check every
+ * durable backend makes: a class that exists to make development behave
+ * like production would undermine itself by accepting values a durable
+ * backend rejects.
+ *
+ * Clearing is supported and always reports 0: nothing is ever waiting.
  *
  * push() runs $job through JobSerializer::serialize() then
- * deserializeJob() before ever invoking it, exactly like every durable
- * backend does before storing/popping a payload — the reconstructed
- * instance is what actually runs, never the caller's own $job. This is
- * the one thing that makes "runs immediately, useful for local
- * development" mean the same thing as "runs on a real worker later":
- * a job whose constructor holds something that can't survive that round
- * trip (a resource, a closure, an unsupported object — see
- * Kinetis\Queue\Support\WireValue) fails here too, at push() time,
- * instead of silently working in development and only failing once
- * actually deployed against a durable backend.
+ * deserializeJob() before invoking it, exactly as a durable backend does
+ * before storing and popping, and the reconstructed instance is what
+ * runs. That is what makes "runs immediately" mean the same thing as
+ * "runs on a real worker later": a constructor holding something that
+ * cannot survive the round trip (a resource, a closure, an unsupported
+ * object — see JobSerializer) fails here, at push() time.
  */
 final readonly class SyncQueue implements ClearableQueueInterface
 {
@@ -126,9 +108,9 @@ final readonly class SyncQueue implements ClearableQueueInterface
             $scope->dispose();
         } catch (Throwable $disposeFailure) {
             if ($jobFailure === null) {
-                // Nothing else failed — this genuinely is the outcome:
-                // propagate it, with telemetry reflecting the real
-                // cleanup failure rather than a false success.
+                // Nothing else failed, so this is the outcome: propagate
+                // it, with telemetry reflecting the real cleanup failure
+                // rather than a false success.
                 Telemetry::global()->jobPushEnded($telemetryToken, $disposeFailure);
 
                 throw $disposeFailure;

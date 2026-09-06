@@ -28,11 +28,14 @@ use Kinetis\Queue\Tests\Fixtures\RecordingLogger;
 use Kinetis\Queue\Tests\Fixtures\RecordingQueueEventListener;
 use Kinetis\Queue\Tests\Fixtures\CapturedScopeHolder;
 use Kinetis\Queue\Tests\Fixtures\ScopeCapturingViaStaticJob;
+use Kinetis\Queue\Tests\Fixtures\SensitiveConstructorFailureJob;
+use Kinetis\Queue\Tests\Fixtures\SensitiveDateJob;
 use Kinetis\Queue\Tests\Fixtures\SensitiveFailingJob;
 use Kinetis\Queue\Tests\Fixtures\SequencedPopQueue;
 use Kinetis\Queue\Tests\Fixtures\ThrowingLogger;
 use Kinetis\Queue\Tests\Fixtures\ThrowingQueueEventListener;
 use Kinetis\Queue\Tests\Fixtures\ThrowingTelemetry;
+use Kinetis\Queue\Tests\Fixtures\ThrowsInConstructorJob;
 use Psr\Log\LoggerInterface;
 use PHPUnit\Framework\TestCase;
 use RuntimeException;
@@ -60,7 +63,7 @@ final class QueueWorkerTest extends TestCase
     public function test_a_negative_poll_timeout_throws_before_the_loop_starts(): void
     {
         $this->expectException(\InvalidArgumentException::class);
-        $this->expectExceptionMessage('$pollTimeoutSeconds must be a finite, positive number');
+        $this->expectExceptionMessage('$pollTimeoutSeconds must be a positive number');
 
         (new QueueWorker($this->app(), new InMemoryQueue()))->run(-1);
     }
@@ -76,7 +79,7 @@ final class QueueWorkerTest extends TestCase
     public function test_a_poll_timeout_of_zero_throws_before_the_loop_starts(): void
     {
         $this->expectException(\InvalidArgumentException::class);
-        $this->expectExceptionMessage('$pollTimeoutSeconds must be a finite, positive number');
+        $this->expectExceptionMessage('$pollTimeoutSeconds must be a positive number');
 
         (new QueueWorker($this->app(), new InMemoryQueue()))->run(0);
     }
@@ -99,7 +102,7 @@ final class QueueWorkerTest extends TestCase
         $worker = new QueueWorker($this->app(), $queue);
 
         $this->expectException(\InvalidArgumentException::class);
-        $this->expectExceptionMessage('$pollTimeoutSeconds must be a finite, positive number');
+        $this->expectExceptionMessage('$pollTimeoutSeconds must be a positive number');
 
         try {
             $worker->run(pollTimeoutSeconds: 0);
@@ -586,6 +589,119 @@ final class QueueWorkerTest extends TestCase
         self::assertArrayNotHasKey('args', $logger->entries[0]['context']['job']);
         self::assertSame(SensitiveFailingJob::class, $logger->entries[0]['context']['job']['class']);
         self::assertStringNotContainsString('not-a-real-token', json_encode($logger->entries[0]['context']['job'], JSON_THROW_ON_ERROR));
+    }
+
+    /**
+     * A stored value that does not parse back into the type its
+     * parameter declares fails inside JobSerializer, and PHP's own enum
+     * and date parsers quote the value they were handed in their
+     * messages. That value can be a #[Sensitive] one, so the
+     * reconstruction failure carries no cause at all: the class and the
+     * argument name are the whole diagnostic, and the logged arguments
+     * are redacted the same way any other exhausted job's are.
+     */
+    public function test_an_unrestorable_sensitive_argument_never_reaches_the_log(): void
+    {
+        $logger = new RecordingLogger();
+        $app = $this->app(static fn (AppScope $app) => $app->instance(LoggerInterface::class, $logger));
+
+        $queue = new PresetQueuedJobQueue(new QueuedJob(
+            SensitiveDateJob::class,
+            ['bornOn' => 'sk-live-do-not-log'],
+            handle: 1,
+            queue: 'default',
+            attempts: 1,
+            maxAttempts: 1,
+        ));
+
+        (new QueueWorker($app, $queue))->processNext();
+
+        self::assertCount(1, $logger->entries);
+        self::assertSame(['bornOn' => '[redacted]'], $logger->entries[0]['context']['job']['args']);
+        self::assertStringNotContainsString('sk-live-do-not-log', $logger->entries[0]['message']);
+        self::assertStringNotContainsString(
+            'sk-live-do-not-log',
+            json_encode($logger->entries[0]['context']['job'], JSON_THROW_ON_ERROR),
+        );
+
+        /** @var \Throwable $logged */
+        $logged = $logger->entries[0]['context']['exception'];
+
+        self::assertNull($logged->getPrevious(), 'the native parser exception quotes the stored value and must not be chained');
+
+        for ($e = $logged; $e !== null; $e = $e->getPrevious()) {
+            self::assertStringNotContainsString('sk-live-do-not-log', $e->getMessage());
+        }
+    }
+
+    /**
+     * The job's own constructor is the other place a #[Sensitive] value
+     * gets quoted: a job validating its input names what it rejected,
+     * and QueueWorker logs both the reconstruction failure's message and
+     * its chained cause. Neither may carry the value.
+     */
+    public function test_a_constructor_failure_never_logs_a_sensitive_argument(): void
+    {
+        $logger = new RecordingLogger();
+        $app = $this->app(static fn (AppScope $app) => $app->instance(LoggerInterface::class, $logger));
+
+        $queue = new PresetQueuedJobQueue(new QueuedJob(
+            SensitiveConstructorFailureJob::class,
+            ['apiKey' => 'sk-live-do-not-log'],
+            handle: 1,
+            queue: 'default',
+            attempts: 1,
+            maxAttempts: 1,
+        ));
+
+        (new QueueWorker($app, $queue))->processNext();
+
+        self::assertCount(1, $logger->entries);
+        self::assertSame(['apiKey' => '[redacted]'], $logger->entries[0]['context']['job']['args']);
+        self::assertStringNotContainsString('sk-live-do-not-log', $logger->entries[0]['message']);
+        self::assertStringNotContainsString(
+            'sk-live-do-not-log',
+            json_encode($logger->entries[0]['context']['job'], JSON_THROW_ON_ERROR),
+        );
+
+        /** @var \Throwable $logged */
+        $logged = $logger->entries[0]['context']['exception'];
+
+        self::assertNull($logged->getPrevious(), 'the constructor quotes the value it rejected and must not be chained');
+
+        for ($e = $logged; $e !== null; $e = $e->getPrevious()) {
+            self::assertStringNotContainsString('sk-live-do-not-log', $e->getMessage());
+        }
+    }
+
+    /**
+     * The counterpart: a constructor with no sensitive argument keeps its
+     * cause, which is the only description of why the job could not be
+     * rebuilt.
+     */
+    public function test_a_constructor_failure_keeps_its_cause_when_no_argument_is_sensitive(): void
+    {
+        $logger = new RecordingLogger();
+        $app = $this->app(static fn (AppScope $app) => $app->instance(LoggerInterface::class, $logger));
+
+        $queue = new PresetQueuedJobQueue(new QueuedJob(
+            ThrowsInConstructorJob::class,
+            ['value' => 'x'],
+            handle: 1,
+            queue: 'default',
+            attempts: 1,
+            maxAttempts: 1,
+        ));
+
+        (new QueueWorker($app, $queue))->processNext();
+
+        self::assertCount(1, $logger->entries);
+        self::assertStringContainsString('the constructor itself always fails', $logger->entries[0]['message']);
+
+        /** @var \Throwable $logged */
+        $logged = $logger->entries[0]['context']['exception'];
+
+        self::assertSame('the constructor itself always fails', $logged->getPrevious()?->getMessage());
     }
 
     public function test_giving_up_redacts_the_arguments_marked_sensitive(): void

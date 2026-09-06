@@ -7,7 +7,7 @@ namespace Kinetis\Queue\Tests\Console;
 use Kinetis\Console\CommandArguments;
 use Kinetis\Queue\ClearableQueueInterface;
 use Kinetis\Queue\Console\ClearCommand;
-use Kinetis\Queue\Exception\InvalidQueueNameException;
+use Kinetis\Queue\Exception\InvalidQueueArgumentException;
 use Kinetis\Queue\Tests\Fixtures\InMemoryQueue;
 use Kinetis\Queue\Tests\Fixtures\NeverCalledQueue;
 use Kinetis\Queue\Tests\Fixtures\RecordingJob;
@@ -95,7 +95,7 @@ final class ClearCommandTest extends TestCase
         try {
             $command->run(CommandArguments::parse(['--queue=high,not a name', '--force']));
             self::fail('Expected the malformed name to be rejected.');
-        } catch (InvalidQueueNameException) {
+        } catch (InvalidQueueArgumentException) {
             self::assertSame(1, $queue->size('high'));
         }
     }
@@ -116,7 +116,7 @@ final class ClearCommandTest extends TestCase
         try {
             $command->run(CommandArguments::parse(['--queue=high,default,high', '--force']));
             self::fail('Expected the duplicate name to be rejected.');
-        } catch (InvalidQueueNameException) {
+        } catch (InvalidQueueArgumentException) {
             self::assertSame(1, $queue->size('high'));
             self::assertSame(1, $queue->size('default'));
         }
@@ -137,7 +137,7 @@ final class ClearCommandTest extends TestCase
         try {
             $command->run(CommandArguments::parse(['--queue=high,not a name']));
             self::fail('Expected the malformed name to be rejected.');
-        } catch (InvalidQueueNameException) {
+        } catch (InvalidQueueArgumentException) {
             self::assertSame(1, $queue->size('high'));
         }
     }
