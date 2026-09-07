@@ -112,7 +112,7 @@ final class ThrowingTelemetry implements TelemetryInterface
     public function taskBatchEnded(mixed $token): void {}
 
     #[\Override]
-    public function taskStarted(int $index): mixed
+    public function taskStarted(int $index, mixed $batchToken): mixed
     {
         return null;
     }
