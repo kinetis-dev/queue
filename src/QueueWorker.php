@@ -312,7 +312,7 @@ final class QueueWorker
 
         $this->dispatch(
             $exhausted
-                ? new JobFailedPermanently($queuedJob->class, $queuedJob->queue, $queuedJob->attempts, $e, $redactedArgs ?? [])
+                ? new JobFailedPermanently($queuedJob->class, $queuedJob->queue, $queuedJob->attempts, $e, $redactedArgs)
                 : new JobReleased($queuedJob->class, $queuedJob->queue, $queuedJob->attempts, $e),
             $exhausted ? 'JobFailedPermanently' : 'JobReleased',
             $queuedJob,
