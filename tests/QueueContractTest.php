@@ -300,6 +300,37 @@ final class QueueContractTest extends TestCase
         QueueContract::storedClass($raw);
     }
 
+    public function test_stored_queue_name_accepts_a_name_the_grammar_allows(): void
+    {
+        self::assertSame('high-priority_2', QueueContract::storedQueueName('high-priority_2'));
+    }
+
+    /**
+     * @return iterable<string, array{mixed}>
+     */
+    public static function invalidStoredQueueNames(): iterable
+    {
+        yield 'null' => [null];
+        yield 'an int' => [42];
+        yield 'an empty string' => [''];
+        yield 'a trailing space' => ['default '];
+        yield 'over the length limit' => [str_repeat('a', 81)];
+    }
+
+    /**
+     * A stored name a caller could never have pushed is corruption in the
+     * backend's own storage, so it settles rather than escaping pop() as
+     * the caller-facing InvalidQueueArgumentException.
+     */
+    #[DataProvider('invalidStoredQueueNames')]
+    public function test_stored_queue_name_rejects_anything_the_grammar_does(mixed $raw): void
+    {
+        $this->expectException(MalformedQueuedJobDataException::class);
+        $this->expectExceptionMessage('"queue"');
+
+        QueueContract::storedQueueName($raw);
+    }
+
     public function test_stored_args_accepts_a_string_keyed_map_and_an_empty_array(): void
     {
         self::assertSame(['foo' => 'bar'], QueueContract::storedArgs(['foo' => 'bar']));

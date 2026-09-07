@@ -221,6 +221,33 @@ final class QueueContract
     }
 
     /**
+     * The queue name a durable backend reads back out of its own storage
+     * instead of taking from its caller. A stored value that is missing,
+     * is not a string, or falls outside the queue-name grammar is
+     * corruption in that storage rather than a mistake at a call site, so
+     * it raises the malformed-data type and settles through
+     * settleIfMalformed() like any other unusable field. A
+     * caller-supplied name goes through assertValidQueueName() instead.
+     */
+    public static function storedQueueName(mixed $raw): string
+    {
+        if (!\is_string($raw)) {
+            throw MalformedQueuedJobDataException::invalidShape('queue', $raw);
+        }
+
+        try {
+            self::assertValidQueueName($raw);
+        } catch (InvalidQueueArgumentException) {
+            // The grammar lives in assertValidQueueName() alone; this
+            // path only reclassifies the failure, and names neither the
+            // rule nor the stored value.
+            throw MalformedQueuedJobDataException::malformedValue('queue', 'it is not a valid queue name');
+        }
+
+        return $raw;
+    }
+
+    /**
      * Every key must be a string, not merely is_array() — a JSON list
      * decodes to an integer-keyed array, which no real push() ever wrote
      * (JobSerializer keys args by constructor parameter name). Left

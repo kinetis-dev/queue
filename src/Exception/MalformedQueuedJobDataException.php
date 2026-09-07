@@ -52,4 +52,9 @@ final class MalformedQueuedJobDataException extends RuntimeException
     {
         return self::corrupted($field, "is out of bounds — {$requirement}");
     }
+
+    public static function malformedValue(string $field, string $requirement): self
+    {
+        return self::corrupted($field, "is malformed — {$requirement}");
+    }
 }
