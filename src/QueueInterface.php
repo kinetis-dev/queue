@@ -40,17 +40,16 @@ namespace Kinetis\Queue;
  * - Every queue gets an immediate, non-blocking check in priority order
  *   before any backend waits on one, so a job already waiting anywhere
  *   is found regardless of its position. Only then does a backend with a
- *   native blocking primitive (Redis, SQS) wait on the highest-priority
- *   queue, and one without (SQL, RabbitMQ) pace its next sweep with a
+ *   native blocking primitive (SQS) wait on the highest-priority queue,
+ *   and one without (Redis, SQL, RabbitMQ) pace its next sweep with a
  *   suspending delay.
  * - $timeoutSeconds bounds how long a backend keeps looking, not when
  *   pop() returns. Every wait is itself bounded. SQL and RabbitMQ cut
- *   their pacing delay to exactly what is left of the deadline. Redis
- *   and SQS wait in whole seconds — the smallest unit BRPOPLPUSH and
- *   WaitTimeSeconds accept, where 0 means "block forever" and "do not
- *   block" respectively — so their wait can outlast the deadline, and
- *   each rechecks it the moment that wait comes back empty rather than
- *   starting another sweep.
+ *   their pacing delay to exactly what is left of the deadline, and so
+ *   does Redis. SQS waits in whole seconds — the smallest unit
+ *   WaitTimeSeconds accepts — so its wait can outlast the deadline, and
+ *   it rechecks the deadline the moment that wait comes back empty
+ *   rather than starting another sweep.
  * - What no backend can bound is an operation already in flight: a
  *   reserve, a receive or a settlement runs to its own completion or its
  *   transport's own timeout. So pop() can return after the deadline;
