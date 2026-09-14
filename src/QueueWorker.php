@@ -7,7 +7,6 @@ namespace Kinetis\Queue;
 use InvalidArgumentException;
 use Kinetis\Container\AppScope;
 use Kinetis\Container\RequestScope;
-use Kinetis\Container\TransactionGuardHook;
 use Kinetis\Events\EventDispatcher;
 use Kinetis\Instrumentation\Telemetry;
 use Kinetis\Queue\Events\JobFailedPermanently;
@@ -27,11 +26,10 @@ use Throwable;
  * One fresh RequestScope per job, via the same
  * AppScope::createRequestScope() a request gets, for the same reason: a
  * job's resolved dependencies must not leak into the next job this
- * process picks up. Each scope also runs
- * {@see TransactionGuardHook::registerIfAvailable()}, so a job that opens
- * a transaction and returns or throws without closing it does not leave
- * it open into whatever runs next on the same connection. The scope is
- * disposed and gc_collect_cycles() runs after every job — a queue worker
+ * process picks up. Every initializer registered through
+ * AppScope::onRequestScopeCreated() runs on each scope, so the cleanup
+ * one registers runs when that job ends. The scope is disposed and
+ * gc_collect_cycles() runs after every job — a queue worker
  * is a persistent process by definition.
  *
  * A job's handle() is invoked via JobInvoker, the same invocation
@@ -216,7 +214,6 @@ final class QueueWorker
         }
 
         $scope = $this->app->createRequestScope();
-        TransactionGuardHook::registerIfAvailable($scope);
         $telemetry = Telemetry::global();
 
         try {

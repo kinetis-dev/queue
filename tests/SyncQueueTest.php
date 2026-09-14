@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Kinetis\Queue\Tests;
 
 use Kinetis\Container\AppScope;
+use Kinetis\Container\RequestScope;
 use Kinetis\Instrumentation\NullTelemetry;
 use Kinetis\Instrumentation\Telemetry;
 use Kinetis\Queue\ClearableQueueInterface;
@@ -123,29 +124,28 @@ final class SyncQueueTest extends TestCase
     }
 
     /**
-     * push() runs Kinetis\Container\TransactionGuardHook::registerIfAvailable()
-     * against each job's scope — but that hook is only ever meaningful
-     * once Kinetis\Persistence\TransactionGuard exists, and that class
-     * lives in the separate, optional kinetis/persistence package, never
-     * installed for this suite. This is the real, always-true
-     * "not installed" branch of the hook's own class_exists() gate,
-     * proving a job still runs normally rather than benefiting from it
-     * implicitly the way every other test in this file already does. The
-     * "is installed" branch — a dangling transaction actually rolled
-     * back — is proven in kinetis/persistence's own test suite instead,
-     * the one place both SyncQueue and TransactionGuard are
-     * simultaneously available.
+     * Each push's scope comes from AppScope::createRequestScope(), so
+     * every registered initializer runs once per job, on a scope of that
+     * job's own, disposed before push() returns.
      */
-    public function test_pushes_a_job_normally_when_the_persistence_package_is_not_installed(): void
+    public function test_each_pushed_job_scope_runs_every_registered_initializer_once(): void
     {
-        self::assertFalse(class_exists('Kinetis\Persistence\TransactionGuard'));
-
-        $app = $this->app();
+        $initialized = [];
+        $app = $this->app(static function (AppScope $app) use (&$initialized): void {
+            $app->onRequestScopeCreated(static function (RequestScope $scope) use (&$initialized): void {
+                $initialized[] = $scope;
+            });
+        });
         $queue = new SyncQueue($app);
 
-        $queue->push(new RecordingJob('still runs'));
+        $queue->push(new RecordingJob('first'));
+        $queue->push(new RecordingJob('second'));
 
-        self::assertSame(['still runs'], $app->get(Recorder::class)->messages);
+        self::assertSame(['first', 'second'], $app->get(Recorder::class)->messages);
+        self::assertCount(2, $initialized);
+        self::assertNotSame($initialized[0], $initialized[1]);
+        self::assertTrue($initialized[0]->isDisposed());
+        self::assertTrue($initialized[1]->isDisposed());
     }
 
     /**

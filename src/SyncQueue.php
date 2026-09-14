@@ -6,7 +6,6 @@ namespace Kinetis\Queue;
 
 use Kinetis\Instrumentation\Telemetry;
 use Kinetis\Container\AppScope;
-use Kinetis\Container\TransactionGuardHook;
 use Kinetis\Logging\SafeLogger;
 use Psr\Log\LoggerInterface;
 use Psr\Log\LogLevel;
@@ -36,9 +35,9 @@ use Throwable;
  * and seeing the real error immediately is the point of running jobs
  * synchronously.
  *
- * The scope still runs {@see TransactionGuardHook::registerIfAvailable()}
- * before invoking the job, so a job that opens a transaction and throws
- * is rolled back on disposal.
+ * Every initializer registered through AppScope::onRequestScopeCreated()
+ * runs on that scope too, so the cleanup one registers runs on disposal
+ * even when the job throws.
  *
  * Disposal precedence: if both the job and its scope's disposal fail,
  * push() rethrows the job's own exception — PHP's `finally` semantics
@@ -94,7 +93,6 @@ final readonly class SyncQueue implements ClearableQueueInterface
         }
 
         $scope = $this->app->createRequestScope();
-        TransactionGuardHook::registerIfAvailable($scope);
 
         $jobFailure = null;
 
