@@ -61,8 +61,12 @@ use Throwable;
  *
  * SIGTERM and SIGINT stop the loop after the job in flight finishes, so
  * a deploy never kills a worker mid-job and strands it in the backend's
- * reserved state. Process supervision itself is left to whatever runs
- * the worker; Docker, systemd and Kubernetes all send SIGTERM first.
+ * reserved state. Those two are the only signals
+ * listenForShutdownSignals() registers: a supervisor sending any other
+ * one — a container whose image declares a different STOPSIGNAL, as the
+ * official PHP FPM images do — ends the process where it stands
+ * instead. Which signal a deployment sends is the deployment's to
+ * choose; see docs/queue.md.
  */
 final class QueueWorker
 {
