@@ -20,6 +20,11 @@ use Throwable;
  * still held by the backend at this point, so there's nothing this event
  * could recover that a later JobFailedPermanently/JobSucceeded for the
  * same job wouldn't already carry.
+ *
+ * No retry delay either, although the release carries one: a listener
+ * acts on the failure having happened, and the delay is a floor the
+ * backend may exceed, so it would be a number no listener could act on.
+ * The failure log line reports it for an operator instead.
  */
 final readonly class JobReleased
 {

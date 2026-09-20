@@ -36,7 +36,7 @@ final class NeverCalledQueue implements QueueInterface
     }
 
     #[\Override]
-    public function release(QueuedJob $job): void
+    public function release(QueuedJob $job, int $delaySeconds = 0): void
     {
         throw new LogicException('The queue backend must not be touched.');
     }

@@ -61,6 +61,38 @@ final class QueueWorkerTest extends TestCase
         new QueueWorker($this->app(), new InMemoryQueue(), -1);
     }
 
+    public function test_a_negative_retry_base_delay_throws_at_construction(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('$retryBaseDelaySeconds must be between 0');
+
+        new QueueWorker($this->app(), new InMemoryQueue(), 3, -1);
+    }
+
+    /**
+     * The admitted range's upper end is the same 900 seconds the
+     * computed delay is capped at: a base above it could only ever
+     * produce the cap, so accepting one would be accepting a setting
+     * this worker silently ignores.
+     */
+    public function test_a_retry_base_delay_above_the_ceiling_throws_at_construction(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('$retryBaseDelaySeconds must be between 0');
+
+        new QueueWorker($this->app(), new InMemoryQueue(), 3, 901);
+    }
+
+    public function test_the_highest_admitted_retry_base_delay_is_accepted(): void
+    {
+        $queue = new InMemoryQueue();
+        $queue->push(new FailingJob('boom'), maxAttempts: 3);
+
+        new QueueWorker($this->app(), $queue, 3, 900)->processNext();
+
+        self::assertSame([900], $queue->releaseDelays);
+    }
+
     public function test_a_negative_poll_timeout_throws_before_the_loop_starts(): void
     {
         $this->expectException(\InvalidArgumentException::class);
@@ -532,6 +564,161 @@ final class QueueWorkerTest extends TestCase
 
         self::assertSame([], $queue->released);
         self::assertCount(1, $queue->failed);
+    }
+
+    /**
+     * The observed failure this backoff exists for: with the default
+     * base and four attempts a job is held 5, 10 and 20 seconds before
+     * the fourth failure gives up, which crosses a dependency outage of
+     * a few tens of seconds instead of burning every attempt in
+     * milliseconds.
+     *
+     * The three delays are asserted as one exact list rather than one at
+     * a time: it is their *progression* that is the contract, and any
+     * formula that merely got the first one right would still pass a
+     * per-value check.
+     */
+    public function test_each_retry_is_released_with_the_next_doubled_delay(): void
+    {
+        $queue = new InMemoryQueue();
+        $queue->push(new FailingJob('boom'), maxAttempts: 4);
+
+        $worker = new QueueWorker($this->app(), $queue, retryBaseDelaySeconds: 5);
+
+        for ($attempt = 1; $attempt <= 4; ++$attempt) {
+            $worker->processNext();
+        }
+
+        self::assertSame([5, 10, 20], $queue->releaseDelays);
+        self::assertCount(1, $queue->failed, 'the fourth failure gives up exactly once');
+    }
+
+    /**
+     * 0 is a real choice, not "unset": a deployment that wants immediate
+     * retries asks for them and gets them, with no delay ever reaching a
+     * backend.
+     */
+    public function test_a_retry_base_delay_of_zero_keeps_every_retry_immediate(): void
+    {
+        $queue = new InMemoryQueue();
+        $queue->push(new FailingJob('boom'), maxAttempts: 4);
+
+        $worker = new QueueWorker($this->app(), $queue, retryBaseDelaySeconds: 0);
+
+        for ($attempt = 1; $attempt <= 4; ++$attempt) {
+            $worker->processNext();
+        }
+
+        self::assertSame([0, 0, 0], $queue->releaseDelays);
+    }
+
+    /**
+     * The doubling stops at the ceiling rather than running away. Three
+     * jobs seeded at consecutive attempt numbers straddle it in one
+     * list: the last delay still doubling, the last one under the cap,
+     * and the first the cap takes over — a formula that moved the
+     * ceiling by one step could not produce all three.
+     */
+    public function test_the_retry_delay_is_capped_rather_than_doubling_without_limit(): void
+    {
+        $queue = new InMemoryQueue();
+
+        // Seeded as completed attempts, so these become QueuedJob
+        // attempts 7, 8 and 9.
+        foreach ([6, 7, 8] as $completedAttempts) {
+            $queue->pushSpent(new FailingJob('boom'), $completedAttempts, maxAttempts: PHP_INT_MAX);
+        }
+
+        $worker = new QueueWorker($this->app(), $queue, retryBaseDelaySeconds: 5);
+        $worker->processNext();
+        $worker->processNext();
+        $worker->processNext();
+
+        self::assertSame([320, 640, 900], $queue->releaseDelays);
+    }
+
+    /**
+     * An attempt number near PHP_INT_MAX still produces the ceiling as a
+     * plain int, and is still released rather than crashing the worker
+     * or settling as something else.
+     *
+     * The capped exponent is what makes that hold for an arithmetic that
+     * stays in integers: raising 2 to nearly PHP_INT_MAX uncapped
+     * saturates to INF, which min() would still reduce to 900, but a
+     * shift-based doubling would wrap to 0 and hand the backend an
+     * immediate retry instead of the ceiling.
+     */
+    public function test_a_very_high_attempt_number_still_yields_the_ceiling(): void
+    {
+        $queue = new InMemoryQueue();
+        $queue->pushSpent(new FailingJob('boom'), PHP_INT_MAX - 2, maxAttempts: PHP_INT_MAX);
+
+        new QueueWorker($this->app(), $queue, retryBaseDelaySeconds: 5)->processNext();
+
+        self::assertSame([900], $queue->releaseDelays);
+        self::assertSame([], $queue->failed, 'still below its cap, so this is a retry rather than a final attempt');
+    }
+
+    /**
+     * The attempt that just failed is 1-indexed, so the first failure
+     * waits the base itself — not twice it, and not nothing.
+     */
+    public function test_the_first_failure_waits_exactly_the_base_delay(): void
+    {
+        $queue = new InMemoryQueue();
+        $queue->push(new FailingJob('boom'), maxAttempts: 3);
+
+        $worker = new QueueWorker($this->app(), $queue, retryBaseDelaySeconds: 7);
+        $worker->processNext();
+        $worker->processNext();
+
+        self::assertSame([7, 14], $queue->releaseDelays);
+    }
+
+    /**
+     * An operator reading one failure line needs to know when the job
+     * comes back, so the delay is in the message and in the structured
+     * `job` context both.
+     */
+    public function test_a_retry_log_line_carries_the_computed_delay(): void
+    {
+        $logger = new RecordingLogger();
+        $app = $this->app(static fn (AppScope $app) => $app->instance(LoggerInterface::class, $logger));
+
+        $queue = new InMemoryQueue();
+        $queue->push(new FailingJob('boom'), maxAttempts: 3);
+
+        $worker = new QueueWorker($app, $queue, retryBaseDelaySeconds: 5);
+        $worker->processNext();
+        $worker->processNext();
+
+        self::assertStringContainsString('retrying in 5s', $logger->entries[0]['message']);
+        self::assertSame(5, $logger->entries[0]['context']['job']['retryDelaySeconds']);
+
+        self::assertStringContainsString('retrying in 10s', $logger->entries[1]['message']);
+        self::assertSame(10, $logger->entries[1]['context']['job']['retryDelaySeconds']);
+    }
+
+    /**
+     * A final attempt calls fail(), which takes no delay, so nothing
+     * about the schedule may appear on the line describing it — a
+     * retryDelaySeconds there would tell an operator to wait for a job
+     * that is never coming back.
+     */
+    public function test_a_permanent_failure_reports_no_retry_delay(): void
+    {
+        $logger = new RecordingLogger();
+        $app = $this->app(static fn (AppScope $app) => $app->instance(LoggerInterface::class, $logger));
+
+        $queue = new InMemoryQueue();
+        $queue->push(new FailingJob('boom'), maxAttempts: 1);
+
+        (new QueueWorker($app, $queue, retryBaseDelaySeconds: 5))->processNext();
+
+        self::assertStringContainsString('failed permanently', $logger->entries[0]['message']);
+        self::assertStringNotContainsString('retrying in', $logger->entries[0]['message']);
+        self::assertArrayNotHasKey('retryDelaySeconds', $logger->entries[0]['context']['job']);
+        self::assertSame([], $queue->releaseDelays);
     }
 
     public function test_run_returns_once_stopped_and_finishes_the_job_in_flight(): void

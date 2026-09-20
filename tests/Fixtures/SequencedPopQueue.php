@@ -78,7 +78,7 @@ final class SequencedPopQueue implements QueueInterface
         $this->acked[] = $job->handle;
     }
 
-    public function release(QueuedJob $job): void
+    public function release(QueuedJob $job, int $delaySeconds = 0): void
     {
         $this->released[] = $job->handle;
     }

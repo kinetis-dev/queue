@@ -12,8 +12,8 @@ use Kinetis\Queue\Exception\MalformedQueuedJobDataException;
 /**
  * The shared validation and decode helpers every backend runs, so
  * RedisQueue, SqlQueue, SqsQueue, RabbitMqQueue and SyncQueue agree on
- * what a queue name is, what push()/pop() accept, and what a corrupted
- * stored message looks like.
+ * what a queue name is, what push()/pop()/release() accept, and what a
+ * corrupted stored message looks like.
  *
  * The assertion methods are pure — they throw or return nothing, and
  * touch no backend — so a backend calls them before any I/O. The
@@ -110,6 +110,23 @@ final class QueueContract
 
         self::assertValidQueueName($queue);
         self::assertValidMaxAttempts($maxAttempts);
+    }
+
+    /**
+     * The release()-side counterpart, run before telemetry, serialization
+     * or any backend I/O. A delay is a floor, not a wall-clock schedule —
+     * the same meaning push()'s own delay carries.
+     *
+     * No universal ceiling: how long a backend can hold a job is the
+     * backend's own property, so SqsQueue layers ChangeMessageVisibility's
+     * 43200-second request-field cap and RabbitMqQueue layers
+     * DelayLadder's, each on top of this rather than instead of it.
+     */
+    public static function assertValidReleaseDelay(int $delaySeconds): void
+    {
+        if ($delaySeconds < 0) {
+            throw InvalidQueueArgumentException::negativeReleaseDelaySeconds($delaySeconds);
+        }
     }
 
     public static function assertValidAttempts(int $attempts): void

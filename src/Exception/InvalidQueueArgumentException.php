@@ -75,6 +75,13 @@ final class InvalidQueueArgumentException extends InvalidArgumentException
         );
     }
 
+    public static function negativeReleaseDelaySeconds(int $delaySeconds): self
+    {
+        return new self(
+            "QueueInterface::release()'s \$delaySeconds must be 0 (retry immediately) or positive, got {$delaySeconds}.",
+        );
+    }
+
     public static function negativeMaxAttempts(int $maxAttempts): self
     {
         return new self(

@@ -29,11 +29,16 @@ final class WorkCommandTest extends TestCase
             // control and observe a shutdown signal — see
             // QueueWorker::assertValidPollTimeout()'s own docblock.
             'zero QUEUE_POLL_TIMEOUT' => ['QUEUE_POLL_TIMEOUT', '0'],
+            'negative QUEUE_RETRY_BASE_DELAY_SECONDS' => ['QUEUE_RETRY_BASE_DELAY_SECONDS', '-1'],
+            // Above the 900-second ceiling the computed backoff is capped
+            // at, so it could only ever produce the cap — a deployment
+            // asking for something this worker will not do.
+            'over-range QUEUE_RETRY_BASE_DELAY_SECONDS' => ['QUEUE_RETRY_BASE_DELAY_SECONDS', '901'],
         ];
     }
 
     /**
-     * Both config bounds are validated before any startup output and
+     * Every config bound is validated before any startup output and
      * before the queue backend is ever touched — proven here two ways at
      * once: the "started" line never reaches the output stream, and
      * NeverCalledQueue throws its own distinct exception if run() ever

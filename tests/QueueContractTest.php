@@ -129,6 +129,28 @@ final class QueueContractTest extends TestCase
         QueueContract::assertValidPushArguments(-1, 'default', null);
     }
 
+    /**
+     * A floor of 0 and no ceiling: how long a backend can hold a job is
+     * the backend's own property, so the universal check only turns away
+     * what no backend can act on.
+     */
+    public function test_a_release_delay_of_zero_or_more_is_accepted(): void
+    {
+        QueueContract::assertValidReleaseDelay(0);
+        QueueContract::assertValidReleaseDelay(900);
+        QueueContract::assertValidReleaseDelay(PHP_INT_MAX);
+
+        $this->addToAssertionCount(3);
+    }
+
+    public function test_release_rejects_a_negative_delay(): void
+    {
+        $this->expectException(InvalidQueueArgumentException::class);
+        $this->expectExceptionMessage('release()');
+
+        QueueContract::assertValidReleaseDelay(-1);
+    }
+
     public function test_push_rejects_an_invalid_queue_name(): void
     {
         $this->expectException(InvalidQueueArgumentException::class);

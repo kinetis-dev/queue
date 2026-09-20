@@ -59,6 +59,16 @@ use Throwable;
  * a job's own push(maxAttempts: ...) always wins. It defaults to 0 (no
  * retries); queue:work reads it from QUEUE_MAX_ATTEMPTS.
  *
+ * **A retry is released with a delay, never immediately by default.**
+ * $retryBaseDelaySeconds (QUEUE_RETRY_BASE_DELAY_SECONDS, default 5)
+ * feeds the deterministic backoff retryDelaySeconds() computes, and the
+ * backend holds the job for it through its own durable primitive. The
+ * worker never sleeps, never keeps a timer, and never retains a request
+ * scope while a job waits: the delay is release()'s argument, and this
+ * loop goes straight back to pop(). Without it a failing dependency
+ * burns every attempt in milliseconds and the job is gone before the
+ * dependency recovers.
+ *
  * SIGTERM and SIGINT stop the loop after the job in flight finishes, so
  * a deploy never kills a worker mid-job and strands it in the backend's
  * reserved state. Those two are the only signals
@@ -72,12 +82,35 @@ final class QueueWorker
 {
     private bool $shouldStop = false;
 
+    /**
+     * The ceiling on a computed retry delay, and on $retryBaseDelaySeconds
+     * itself. Worker policy rather than any backend's limit: 15 minutes is
+     * long enough to outlast an ordinary dependency outage and short
+     * enough that a queue drains again without an operator's help. A
+     * deployment that wants a different shape changes the base, so this
+     * stays a constant rather than a second setting to keep consistent
+     * with it.
+     */
+    private const int MAX_RETRY_DELAY_SECONDS = 900;
+
+    /**
+     * The highest exponent the doubling uses. Past it every delay is the
+     * ceiling anyway — even a base of 1 clears 900 by then — so this
+     * changes no result a deployment can ask for. What it buys is that
+     * the arithmetic stays in integers on an unbounded attempt count,
+     * rather than leaning on `2 **` saturating to INF and min() quietly
+     * absorbing it.
+     */
+    private const int MAX_RETRY_BACKOFF_EXPONENT = 10;
+
     public function __construct(
         private readonly AppScope $app,
         private readonly QueueInterface $queue,
         private readonly int $defaultMaxAttempts = 0,
+        private readonly int $retryBaseDelaySeconds = 5,
     ) {
         self::assertValidDefaultMaxAttempts($defaultMaxAttempts);
+        self::assertValidRetryBaseDelay($retryBaseDelaySeconds);
     }
 
     /**
@@ -90,6 +123,24 @@ final class QueueWorker
     {
         if ($defaultMaxAttempts < 0) {
             throw new InvalidArgumentException("\$defaultMaxAttempts must not be negative, got {$defaultMaxAttempts}.");
+        }
+    }
+
+    /**
+     * Exposed for the same pre-flight reason as
+     * assertValidDefaultMaxAttempts(). 0 explicitly selects immediate
+     * retries; a negative value is not a delay, and a base above the
+     * ceiling the backoff is capped at anyway is a deployment asking for
+     * something this worker will not do rather than a value to silently
+     * clamp.
+     */
+    public static function assertValidRetryBaseDelay(int $retryBaseDelaySeconds): void
+    {
+        if ($retryBaseDelaySeconds < 0 || $retryBaseDelaySeconds > self::MAX_RETRY_DELAY_SECONDS) {
+            throw new InvalidArgumentException(
+                "\$retryBaseDelaySeconds must be between 0 (retry immediately) and "
+                . self::MAX_RETRY_DELAY_SECONDS . " seconds, got {$retryBaseDelaySeconds}.",
+            );
         }
     }
 
@@ -245,7 +296,7 @@ final class QueueWorker
             }
 
             if ($failure === null) {
-                if ($this->transition(JobSettlement::Ack, $queuedJob, null, $scope, $telemetry, $jobToken)) {
+                if ($this->transition(JobSettlement::Ack, $queuedJob, 0, null, $scope, $telemetry, $jobToken)) {
                     $this->dispatch(
                         new JobSucceeded($queuedJob->class, $queuedJob->queue, $queuedJob->attempts),
                         'JobSucceeded',
@@ -264,19 +315,58 @@ final class QueueWorker
     }
 
     /**
+     * The floor a failed attempt's retry is held for:
+     * `min(900, base * 2 ** min($attempts - 1, 10))`.
+     *
+     * $attempts is QueuedJob::$attempts, 1-indexed and naming the attempt
+     * that just failed, so the first failure waits the base itself and
+     * each later one doubles. With the default base of 5 and four
+     * attempts that is 5, 10 and 20 seconds before the fourth failure
+     * gives up — long enough to cross a dependency outage of the tens of
+     * seconds that motivated it.
+     *
+     * Deterministic, with no jitter: a delayed release is already spread
+     * across whenever each worker's own attempt failed, and a reproducible
+     * schedule is what makes an operator's "it retries at 5, 10, 20" true.
+     *
+     * Private: handleFailure() is the only caller, and the schedule is
+     * observable where it matters — in the delay release() receives and
+     * in the failure log line.
+     */
+    private function retryDelaySeconds(int $attempts): int
+    {
+        return min(
+            self::MAX_RETRY_DELAY_SECONDS,
+            $this->retryBaseDelaySeconds * (2 ** min($attempts - 1, self::MAX_RETRY_BACKOFF_EXPONENT)),
+        );
+    }
+
+    /**
      * Chooses fail() over release() once QueuedJob::$attempts has reached
      * the effective cap, and describes the failure before either runs so
      * a broken logger cannot block the transition.
+     *
+     * The backoff is computed only on the retrying path: a final attempt
+     * settles with fail(), which takes no delay, so nothing about the
+     * schedule can affect a job this worker is giving up on.
      */
     private function handleFailure(QueuedJob $queuedJob, Throwable $e, RequestScope $scope, Telemetry $telemetry, mixed $jobToken): void
     {
         $exhausted = $queuedJob->attempts >= ($queuedJob->maxAttempts ?? $this->defaultMaxAttempts);
+        $retryDelaySeconds = $exhausted ? 0 : $this->retryDelaySeconds($queuedJob->attempts);
 
         $context = [
             'class' => $queuedJob->class,
             'queue' => $queuedJob->queue,
             'attempts' => $queuedJob->attempts,
         ];
+
+        if (!$exhausted) {
+            // What an operator reading one failure line needs to know
+            // next: when this job comes back. Only meaningful where a
+            // retry is actually scheduled.
+            $context['retryDelaySeconds'] = $retryDelaySeconds;
+        }
 
         // A job that will be retried is still held by the backend with
         // its payload intact, so logging the arguments adds nothing
@@ -301,13 +391,13 @@ final class QueueWorker
         $this->runBestEffort(fn (): mixed => $scope->get(LoggerInterface::class)->error(
             $exhausted
                 ? "Job \"{$queuedJob->class}\" failed permanently after {$queuedJob->attempts} attempt(s): {$e->getMessage()}"
-                : "Job \"{$queuedJob->class}\" failed (attempt {$queuedJob->attempts}): {$e->getMessage()}",
+                : "Job \"{$queuedJob->class}\" failed (attempt {$queuedJob->attempts}), retrying in {$retryDelaySeconds}s: {$e->getMessage()}",
             ['exception' => $e, 'job' => $context],
         ));
 
         $operation = $exhausted ? JobSettlement::Fail : JobSettlement::Release;
 
-        if (!$this->transition($operation, $queuedJob, $e, $scope, $telemetry, $jobToken)) {
+        if (!$this->transition($operation, $queuedJob, $retryDelaySeconds, $e, $scope, $telemetry, $jobToken)) {
             return;
         }
 
@@ -323,14 +413,18 @@ final class QueueWorker
 
     /**
      * The job's one durable transition, followed by the telemetry that
-     * closes its span. Returns whether the backend actually settled it:
-     * a transition rejected as stale wrote nothing, so no completion
-     * event may follow it — reportSettlementLost() takes over instead.
+     * closes its span. $releaseDelaySeconds is the backoff the release
+     * path holds the job for and is ignored by the other two, neither of
+     * which leaves anything to become available again. Returns whether
+     * the backend actually settled it: a transition rejected as stale
+     * wrote nothing, so no completion event may follow it —
+     * reportSettlementLost() takes over instead.
      * Every other exception from ack()/release()/fail() propagates.
      */
     private function transition(
         JobSettlement $operation,
         QueuedJob $queuedJob,
+        int $releaseDelaySeconds,
         ?Throwable $failure,
         RequestScope $scope,
         Telemetry $telemetry,
@@ -339,7 +433,7 @@ final class QueueWorker
         try {
             match ($operation) {
                 JobSettlement::Ack => $this->queue->ack($queuedJob),
-                JobSettlement::Release => $this->queue->release($queuedJob),
+                JobSettlement::Release => $this->queue->release($queuedJob, $releaseDelaySeconds),
                 JobSettlement::Fail => $this->queue->fail($queuedJob),
             };
         } catch (StaleJobHandleException $stale) {

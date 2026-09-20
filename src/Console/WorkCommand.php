@@ -60,10 +60,15 @@ final readonly class WorkCommand
         // push(maxAttempts: ...) always overrides this.
         $defaultMaxAttempts = $this->config->int('QUEUE_MAX_ATTEMPTS', 0);
 
-        // Both validated through QueueWorker's own shared assertions
+        // The first retry's delay, doubling per attempt up to the
+        // worker's own ceiling — see QueueWorker's own docblock.
+        $retryBaseDelaySeconds = $this->config->int('QUEUE_RETRY_BASE_DELAY_SECONDS', 5);
+
+        // All three validated through QueueWorker's own shared assertions
         // before any startup output — an invalid deployment must never
         // print "started" (or the pcntl warning) and then fail.
         QueueWorker::assertValidDefaultMaxAttempts($defaultMaxAttempts);
+        QueueWorker::assertValidRetryBaseDelay($retryBaseDelaySeconds);
         QueueWorker::assertValidPollTimeout($pollTimeoutSeconds);
 
         fwrite($this->output, 'Queue worker started, listening on: ' . implode(', ', $queues) . "\n");
@@ -75,7 +80,8 @@ final readonly class WorkCommand
                 . "A deploy will interrupt whatever job is running. Install pcntl to avoid that.\n",
             );
         }
-        new QueueWorker($this->scope->appScope(), $this->queue, $defaultMaxAttempts)->run($pollTimeoutSeconds, $queues);
+        new QueueWorker($this->scope->appScope(), $this->queue, $defaultMaxAttempts, $retryBaseDelaySeconds)
+            ->run($pollTimeoutSeconds, $queues);
         fwrite($this->output, "Queue worker stopped.\n");
 
         return 0;

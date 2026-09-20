@@ -25,8 +25,9 @@ API-first applications, developed in the
 One `Kinetis\Queue\QueueInterface` — push a job from application code, a
 separate `kinetis queue:work` worker process pops and runs it. Named,
 priority-ordered queues, bounded retries (`maxAttempts`, defaulting to
-no retries at all), and named connections come built in. A job given up
-on is logged with its arguments, minus any constructor parameter marked
+no retries at all) with an exponential backoff the backend holds the job
+through, and named connections come built in. A job given up on is
+logged with its arguments, minus any constructor parameter marked
 `Kinetis\Queue\Attributes\Sensitive`. Every backend — Redis
 ([`kinetis/queue-redis`](https://github.com/kinetis-dev/queue-redis)), SQL ([`kinetis/queue-sql`](https://github.com/kinetis-dev/queue-sql)), Amazon SQS
 ([`kinetis/queue-sqs`](https://github.com/kinetis-dev/queue-sqs)), and RabbitMQ ([`kinetis/queue-rabbitmq`](https://github.com/kinetis-dev/queue-rabbitmq)) — lives in
@@ -165,6 +166,7 @@ package to install.
 | `QUEUE_CONNECTION` | *(required)* | `redis`, `sql`, `sqs`, or `rabbitmq` — each needs its own package installed. |
 | `QUEUE_CONNECTION_NAME` | `default` | Which named connection block the backend uses. |
 | `QUEUE_MAX_ATTEMPTS` | `0` | Worker-level default attempts cap (`0` = no retries); a job's own `push(maxAttempts: ...)` wins. |
+| `QUEUE_RETRY_BASE_DELAY_SECONDS` | `5` | Seconds the first retry waits, doubling per attempt up to a fixed 15-minute ceiling. `0`–`900`; `0` retries immediately. The backend holds the job, so the worker never sleeps. |
 | `QUEUE_POLL_TIMEOUT` | `5` | Seconds `queue:work` waits per poll; must be at least 1, so the worker can periodically check for a shutdown signal. |
 
 Full reference across every package:

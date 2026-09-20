@@ -9,6 +9,7 @@ use Kinetis\Queue\Exception\StaleJobHandleException;
 use Kinetis\Queue\Job;
 use Kinetis\Queue\JobSerializer;
 use Kinetis\Queue\JobSettlement;
+use Kinetis\Queue\QueueContract;
 use Kinetis\Queue\QueuedJob;
 use RuntimeException;
 
@@ -17,9 +18,12 @@ use RuntimeException;
  * QueueWorker's own orchestration logic (resolve handle()'s parameters,
  * invoke it, ack on success, release on failure) is tested against real
  * push()/pop()/ack()/release() behavior instead of pre-programmed return
- * values. Ignores $delaySeconds and $timeoutSeconds entirely — no
- * backend-specific timing behavior to fake here, only FIFO order,
- * priority-by-queue-order, and ack/release bookkeeping.
+ * values. Ignores push()'s $delaySeconds and $timeoutSeconds entirely —
+ * no backend-specific timing behavior to fake here, only FIFO order,
+ * priority-by-queue-order, and ack/release bookkeeping. release()'s own
+ * $delaySeconds is validated like a real backend's and recorded on
+ * $releaseDelays rather than held for, since the point under test is
+ * what QueueWorker asks for.
  */
 final class InMemoryQueue implements ClearableQueueInterface
 {
@@ -31,6 +35,15 @@ final class InMemoryQueue implements ClearableQueueInterface
 
     /** @var list<int> */
     public array $released = [];
+
+    /**
+     * The $delaySeconds each release() was given, in the same order as
+     * $released — what proves QueueWorker's backoff reaches the backend
+     * rather than only its own log line.
+     *
+     * @var list<int>
+     */
+    public array $releaseDelays = [];
 
     /** @var list<int> */
     public array $failed = [];
@@ -61,7 +74,24 @@ final class InMemoryQueue implements ClearableQueueInterface
 
     public function push(Job $job, int $delaySeconds = 0, string $queue = 'default', ?int $maxAttempts = null): void
     {
-        $this->pending[$queue][] = [...JobSerializer::serialize($job), 'attempts' => 0, 'maxAttempts' => $maxAttempts];
+        $this->pushSpent($job, completedAttempts: 0, maxAttempts: $maxAttempts, queue: $queue);
+    }
+
+    /**
+     * Stores a job as though $completedAttempts deliveries had already
+     * been spent on it, so a test can observe what the worker does at a
+     * high attempt number without driving that many iterations. push()
+     * cannot take this — its signature is QueueInterface's — and a real
+     * backend reaches the same state by counting deliveries, which is
+     * exactly what is being skipped here.
+     */
+    public function pushSpent(Job $job, int $completedAttempts, ?int $maxAttempts = null, string $queue = 'default'): void
+    {
+        $this->pending[$queue][] = [
+            ...JobSerializer::serialize($job),
+            'attempts' => $completedAttempts,
+            'maxAttempts' => $maxAttempts,
+        ];
     }
 
     public function pop(int $timeoutSeconds = 0, array $queues = ['default']): ?QueuedJob
@@ -105,8 +135,10 @@ final class InMemoryQueue implements ClearableQueueInterface
         $this->acked[] = $handle;
     }
 
-    public function release(QueuedJob $job): void
+    public function release(QueuedJob $job, int $delaySeconds = 0): void
     {
+        QueueContract::assertValidReleaseDelay($delaySeconds);
+
         if ($this->releaseShouldThrowStale) {
             $this->releaseShouldThrowStale = false;
 
@@ -116,6 +148,7 @@ final class InMemoryQueue implements ClearableQueueInterface
         /** @var int $handle */
         $handle = $job->handle;
         $this->released[] = $handle;
+        $this->releaseDelays[] = $delaySeconds;
         $this->pending[$job->queue][] = [
             'class' => $job->class,
             'args' => $job->args,

@@ -47,10 +47,11 @@ use Throwable;
  * is the outcome: it propagates, and telemetry reflects it rather than
  * a false success.
  *
- * $queue, $delaySeconds and $maxAttempts are accepted for interface
- * compliance and have no effect — there is nothing to partition, delay
- * or retry. All three are still validated through
- * QueueContract::assertValidPushArguments(), the same check every
+ * push()'s $queue, $delaySeconds and $maxAttempts, and release()'s own
+ * $delaySeconds, are accepted for interface compliance and have no
+ * effect — there is nothing to partition, delay or retry. All four are
+ * still validated through QueueContract::assertValidPushArguments() and
+ * QueueContract::assertValidReleaseDelay(), the same checks every
  * durable backend makes: a class that exists to make development behave
  * like production would undermine itself by accepting values a durable
  * backend rejects.
@@ -151,11 +152,19 @@ final readonly class SyncQueue implements ClearableQueueInterface
         // never happens here — see the class docblock.
     }
 
+    /**
+     * $delaySeconds is validated and then has nothing to act on, the
+     * same stance push()'s own arguments take: a mistake must not behave
+     * differently in local development than it does in production.
+     */
     #[\Override]
-    public function release(QueuedJob $job): void
+    public function release(QueuedJob $job, int $delaySeconds = 0): void
     {
-        // No-op: QueueWorker only calls this after a non-null pop(), which
-        // never happens here — see the class docblock.
+        QueueContract::assertValidReleaseDelay($delaySeconds);
+
+        // No storage to make the job available in, delayed or otherwise:
+        // QueueWorker only calls this after a non-null pop(), which never
+        // happens here — see the class docblock.
     }
 
     #[\Override]

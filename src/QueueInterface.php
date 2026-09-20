@@ -90,7 +90,29 @@ interface QueueInterface
 
     public function ack(QueuedJob $job): void;
 
-    public function release(QueuedJob $job): void;
+    /**
+     * Makes this delivery's job available again, no sooner than
+     * $delaySeconds from now — each backend's own durable primitive: a
+     * later `available_at`, a due score in the delayed sorted set, an
+     * SQS visibility timeout, a delay-ladder publication. The worker
+     * never sleeps and holds no scope while a job waits out its delay.
+     *
+     * The delay is a floor, not a wall-clock schedule, exactly as
+     * push()'s is: expiry work, promotion sweeps and poll pacing can put
+     * the job later. 0 makes it poppable immediately.
+     *
+     * $delaySeconds is validated by every backend through
+     * QueueContract::assertValidReleaseDelay(), before telemetry,
+     * serialization or any I/O: negative is rejected. There is no
+     * universal ceiling, because how long a backend can hold a job is
+     * the backend's own property — SqsQueue layers
+     * ChangeMessageVisibility's 43200-second request-field cap and
+     * RabbitMqQueue layers its delay ladder's, each on top of that
+     * check. A local cap is what a backend can know before the call; a
+     * backend may still be refused by its service, which surfaces as
+     * that service's own error (see SqsQueue::release()).
+     */
+    public function release(QueuedJob $job, int $delaySeconds = 0): void;
 
     /**
      * Permanently removes the job without retrying it — the same storage

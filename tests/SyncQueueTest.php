@@ -84,8 +84,24 @@ final class SyncQueueTest extends TestCase
 
         $queue->ack($queuedJob);
         $queue->release($queuedJob);
+        $queue->release($queuedJob, 30);
 
         $this->expectNotToPerformAssertions();
+    }
+
+    /**
+     * Nothing here can hold a job for a delay, but a value no durable
+     * backend accepts is still rejected: development must not quietly
+     * tolerate what production refuses.
+     */
+    public function test_release_rejects_a_negative_delay(): void
+    {
+        $queue = new SyncQueue($this->app());
+        $queuedJob = new QueuedJob(RecordingJob::class, ['message' => 'x'], handle: 1, queue: 'default');
+
+        $this->expectException(InvalidQueueArgumentException::class);
+
+        $queue->release($queuedJob, -1);
     }
 
     public function test_a_failing_jobs_exception_propagates_to_the_caller(): void

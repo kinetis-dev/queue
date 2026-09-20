@@ -20,7 +20,11 @@ enum JobSettlement: string
     /** The job's handle() returned. */
     case Ack = 'ack';
 
-    /** The job's handle() threw with attempts left under the cap. */
+    /**
+     * The job's handle() threw with attempts left under the cap, so the
+     * backend holds it for the worker's retry backoff and then makes it
+     * poppable again.
+     */
     case Release = 'release';
 
     /** The job's handle() threw with attempts at the cap. */
