@@ -12,7 +12,8 @@ namespace Kinetis\Queue;
  * Only operations every backend delivers exactly as written live here.
  * Anything a backend can merely approximate belongs to a separate
  * capability interface — see ClearableQueueInterface, which owns
- * clear() for that reason.
+ * clear() for that reason, and DisposableQueueInterface, which owns
+ * closing a connection the queue opened for itself.
  *
  * **Delivery is at-least-once.** A job's handle() may run more than once
  * for the same logical job: a worker that dies mid-job leaves the

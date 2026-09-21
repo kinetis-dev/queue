@@ -79,8 +79,9 @@ following automatically, through the `extra.kinetis` declaration in its
   what makes a listener marked `Kinetis\Events\ShouldQueue` actually
   queue, with no second stanza to write. All three are built on first
   use, so an application that never injects a queue builds no backend.
-  Inert when `QUEUE_CONNECTION` is unset, leaving core's synchronous
-  listener invoker in place.
+  A backend built that way owns its connection, and this package closes
+  it when the worker ends — see below. Inert when `QUEUE_CONNECTION` is
+  unset, leaving core's synchronous listener invoker in place.
 - **Events**, dispatched by `queue:work` around every job's outcome —
   register a `#[Listener]` for whichever one you need:
   `Kinetis\Queue\Events\JobSucceeded`, `JobReleased` (a job failed but
@@ -91,6 +92,36 @@ following automatically, through the `extra.kinetis` declaration in its
   for the full list across every package.
 
 Nothing else — no routes, middleware, event listeners, or MCP tools.
+
+## A queue owns the connection its factory opened
+
+A queue backend lives for the whole worker, so its connection is opened
+once and closed once, when the worker ends. That close lives on
+`Kinetis\Queue\DisposableQueueInterface` — `dispose()`, extending
+`QueueInterface`, declared by `kinetis/queue-redis`, `kinetis/queue-sql`
+and `kinetis/queue-rabbitmq`. `kinetis/queue-sqs` does not declare it:
+its transport is an HTTP client with no queue-owned connection to close.
+
+Ownership travels with construction, not with the type. A backend's
+`fromConfig()` opens the client or link it hands the queue, so it hands
+over the operation that closes it too, and the backend this package
+binds from `QUEUE_CONNECTION` has its `dispose()` registered on the
+application scope when something first injects it. A constructor called
+directly receives a transport you already own and closes none of it:
+`dispose()` is then a no-op. Build a backend yourself and the disposal
+is yours to register:
+
+```php
+use Kinetis\Queue\QueueInterface;
+use Kinetis\QueueSql\SqlQueueFactory;
+
+$queue = SqlQueueFactory::fromConfig($config);
+
+$app->instance(QueueInterface::class, $queue);
+$app->onDispose($queue->dispose(...));
+```
+
+`dispose()` is idempotent and safe before the queue's first I/O.
 
 ## Clearing is a separate capability
 

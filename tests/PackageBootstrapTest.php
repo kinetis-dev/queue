@@ -15,6 +15,7 @@ use Kinetis\Queue\InvokeListenerJob;
 use Kinetis\Queue\PackageBootstrap;
 use Kinetis\Queue\QueuedListenerInvoker;
 use Kinetis\Queue\QueueInterface;
+use Kinetis\Queue\Tests\Fixtures\DisposableApplicationQueue;
 use Kinetis\Queue\Tests\Fixtures\InMemoryQueue;
 use Kinetis\Queue\Tests\Fixtures\NeverCalledQueue;
 use Kinetis\Queue\Tests\Fixtures\TestEvent;
@@ -134,6 +135,27 @@ final class PackageBootstrapTest extends TestCase
 
         $this->expectException(QueueUnavailableException::class);
         $app->get(QueueInterface::class);
+    }
+
+    /**
+     * An application queue never reaches the factory closure that
+     * registers disposal, so the connection behind it stays open for
+     * whoever opened it — capability or no capability.
+     */
+    public function test_an_application_queue_is_never_disposed_by_this_bootstrap(): void
+    {
+        $app = new AppScope();
+        new PackageBootstrap()->register($app, new Config(['QUEUE_CONNECTION' => 'redis']));
+
+        $applicationQueue = new DisposableApplicationQueue();
+        $app->instance(QueueInterface::class, $applicationQueue);
+        $app->boot();
+
+        self::assertSame($applicationQueue, $app->get(QueueInterface::class));
+
+        $app->dispose();
+
+        self::assertSame(0, $applicationQueue->disposeCalls, "the application's own queue is the application's to close");
     }
 
     public function test_the_capability_answers_with_the_application_queue_that_replaced_a_clearable_connection(): void

@@ -39,6 +39,13 @@ use Psr\Container\ContainerInterface;
  * asking for it raises {@see QueueNotClearableException}, naming the
  * backend.
  *
+ * A backend built here owns the connection its factory opened, so
+ * resolving one that declares {@see DisposableQueueInterface} also
+ * registers its dispose() on the application scope. Nothing else is
+ * registered: an application's own QueueInterface binding stops this
+ * factory from running at all, and closing the queue it bound instead
+ * belongs to whoever opened that one.
+ *
  * ListenerInvokerInterface is what makes Kinetis\Events\ShouldQueue mean
  * what it says: a configured queue is the whole of "queue my queued
  * listeners", with no second stanza to remember. Core binds its own
@@ -57,7 +64,20 @@ final class PackageBootstrap implements PackageBootstrapInterface
             return;
         }
 
-        $app->bind(QueueInterface::class, static fn (): QueueInterface => QueueFactory::fromConfig($config));
+        $app->bind(QueueInterface::class, static function (AppScope $app) use ($config): QueueInterface {
+            $queue = QueueFactory::fromConfig($config);
+
+            // This binding opened the backend's connection, so this
+            // binding closes it when the worker ends — registered
+            // against the one instance built here, never against an
+            // application's own queue, which never reaches this closure
+            // at all.
+            if ($queue instanceof DisposableQueueInterface) {
+                $app->onDispose($queue->dispose(...));
+            }
+
+            return $queue;
+        });
 
         $app->bind(
             ClearableQueueInterface::class,
