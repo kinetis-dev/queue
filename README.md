@@ -180,6 +180,32 @@ line report the loss. Every other exception from a settlement propagates
 and stops the worker. Full detail:
 [kinetis.dev/docs/queue.html](https://kinetis.dev/docs/queue.html).
 
+## A running job keeps its reservation
+
+A backend that holds a delivery for a finite window it can push forward
+declares `Kinetis\Queue\RenewableQueueInterface`, which adds
+`visibilityTimeoutSeconds()` and `renew(QueuedJob $job)`:
+`kinetis/queue-redis`, `kinetis/queue-sql` and `kinetis/queue-sqs`.
+`kinetis/queue-rabbitmq` needs neither — its channel holds the
+unacknowledged delivery for as long as the connection lives — and
+neither does `SyncQueue`.
+
+`queue:work` resolves the capability once and renews the running job's
+reservation at half that window, so a job that legitimately takes longer
+than the window keeps its delivery instead of being handed to a second
+worker. There is nothing to configure and nothing for a job to call: a
+job never sees its own receipt.
+
+Delivery is still at least once. Nothing renews once the worker dies —
+which is the point — and a handler that never yields to the event loop
+cannot be renewed either, because nothing in the worker can interrupt
+running PHP. A renewal the backend refuses neither fails nor settles the
+job: the worker keeps trying for the rest of the job and, after it has
+attempted the job's own settlement, logs one `error` with the failure
+count and the last exception. A renewal the worker cannot wait out
+before settling is the exception — it stops the worker with the delivery
+unsettled, rather than settling one a suspended renewal can still reach.
+
 ## Configuration
 
 Read from the environment (or `.env`) via `Kinetis\Config` — by
@@ -199,6 +225,7 @@ package to install.
 | `QUEUE_MAX_ATTEMPTS` | `0` | Worker-level default attempts cap (`0` = no retries); a job's own `push(maxAttempts: ...)` wins. |
 | `QUEUE_RETRY_BASE_DELAY_SECONDS` | `5` | Seconds the first retry waits, doubling per attempt up to a fixed 15-minute ceiling. `0`–`900`; `0` retries immediately. The backend holds the job, so the worker never sleeps. |
 | `QUEUE_POLL_TIMEOUT` | `5` | Seconds `queue:work` waits per poll; must be at least 1, so the worker can periodically check for a shutdown signal. |
+| `QUEUE_VISIBILITY_TIMEOUT_SECONDS` | `300` | Read by `kinetis/queue-redis`, `kinetis/queue-sql` and `kinetis/queue-sqs`: how long a crashed worker's job stays reserved. The worker renews a running job's reservation at half this, so it sizes crash recovery rather than job duration. |
 
 Full reference across every package:
 [kinetis.dev/docs/config.html](https://kinetis.dev/docs/config.html).

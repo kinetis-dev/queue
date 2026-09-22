@@ -46,6 +46,22 @@ use Throwable;
  * real-failure log line runs ahead of the transition, describing the
  * outcome rather than deciding it, and is contained the same way.
  *
+ * **A reservation is renewed while its job runs.** A backend that
+ * declares RenewableQueueInterface — Redis, SQL and SQS — gets a
+ * DeliveryHeartbeat for the duration of invoke(): one unreferenced
+ * Revolt repeat watcher at half the backend's visibility window, fenced
+ * on the delivery's own receipt, joined before anything is settled. A
+ * job that legitimately runs longer than that window therefore keeps
+ * its delivery instead of being handed to a second worker. Delivery
+ * stays at-least-once: a worker that dies stops renewing and the window
+ * still expires. A handler that never yields to the event loop is never
+ * renewed, because nothing can interrupt it. A failed renewal call
+ * decides nothing — failures are counted, the last one is logged once
+ * after the settlement attempt, and the loop carries on. An in-flight
+ * renewal the worker cannot join is the one exception: quiescence was
+ * never established, so that failure propagates and the delivery is not
+ * settled at all.
+ *
  * A throwing job does not stop or escape the loop — the same "one bad
  * unit of work must not crash a long-running process" reasoning behind
  * ExceptionHandlerMiddleware. Neither does a transition the backend
@@ -103,6 +119,13 @@ final class QueueWorker
      */
     private const int MAX_RETRY_BACKOFF_EXPONENT = 10;
 
+    /**
+     * The same queue again when it can extend a reservation, and null
+     * when it cannot — resolved once here rather than per job, since the
+     * backend a worker was built with never changes under it.
+     */
+    private readonly ?RenewableQueueInterface $renewableQueue;
+
     public function __construct(
         private readonly AppScope $app,
         private readonly QueueInterface $queue,
@@ -111,6 +134,8 @@ final class QueueWorker
     ) {
         self::assertValidDefaultMaxAttempts($defaultMaxAttempts);
         self::assertValidRetryBaseDelay($retryBaseDelaySeconds);
+
+        $this->renewableQueue = $queue instanceof RenewableQueueInterface ? $queue : null;
     }
 
     /**
@@ -289,23 +314,45 @@ final class QueueWorker
 
             $failure = null;
 
+            // Started before the handler and joined before anything is
+            // settled, so the delivery this worker is about to ack,
+            // release or fail is still the one it holds — and so no
+            // renewal can land after a delayed release and undo its
+            // backoff. Nothing of it outlives this block: stop() either
+            // establishes that or throws, and a throw from it skips the
+            // settlement below rather than settling a delivery a
+            // suspended renewal can still reach.
+            $heartbeat = $this->renewableQueue !== null
+                ? DeliveryHeartbeat::start($this->renewableQueue, $queuedJob)
+                : null;
+
             try {
                 JobInvoker::invoke(JobSerializer::deserializeJob($queuedJob->class, $queuedJob->args), $scope);
             } catch (Throwable $e) {
                 $failure = $e;
+            } finally {
+                $heartbeat?->stop();
             }
 
-            if ($failure === null) {
-                if ($this->transition(JobSettlement::Ack, $queuedJob, 0, null, $scope, $telemetry, $jobToken)) {
-                    $this->dispatch(
-                        new JobSucceeded($queuedJob->class, $queuedJob->queue, $queuedJob->attempts),
-                        'JobSucceeded',
-                        $queuedJob,
-                        $scope,
-                    );
+            try {
+                if ($failure === null) {
+                    if ($this->transition(JobSettlement::Ack, $queuedJob, 0, null, $scope, $telemetry, $jobToken)) {
+                        $this->dispatch(
+                            new JobSucceeded($queuedJob->class, $queuedJob->queue, $queuedJob->attempts),
+                            'JobSucceeded',
+                            $queuedJob,
+                            $scope,
+                        );
+                    }
+                } else {
+                    $this->handleFailure($queuedJob, $failure, $scope, $telemetry, $jobToken);
                 }
-            } else {
-                $this->handleFailure($queuedJob, $failure, $scope, $telemetry, $jobToken);
+            } finally {
+                // In a finally so a settlement that throws still leaves
+                // the renewal trouble on the record — reported after the
+                // settlement attempt, and never in place of its own
+                // exception.
+                $this->reportRenewalFailures($heartbeat, $queuedJob, $scope);
             }
         } finally {
             $this->disposeScope($scope, $queuedJob);
@@ -513,6 +560,50 @@ final class QueueWorker
             $scope,
             "A {$name} listener failed for job \"{$queuedJob->class}\"",
         );
+    }
+
+    /**
+     * The one line a failed renewal call produces, written after the
+     * settlement attempt — and after the lifecycle event too, when that
+     * settlement succeeded. A renewal failure is not a job failure and
+     * not a settlement failure: the handler ran, the delivery was
+     * settled or the settlement's own exception is already propagating,
+     * and all this adds is that the reservation may have lapsed while
+     * the job ran — which is why it is a log line rather than an event,
+     * an exception or a retry policy.
+     *
+     * A heartbeat the worker could not join never reaches this: that
+     * failure propagates from DeliveryHeartbeat::stop() ahead of any
+     * settlement, and is the exception the worker's supervisor sees.
+     *
+     * The last exception is the test for "anything failed": the
+     * heartbeat records the two together, so a non-null one is exactly a
+     * non-zero count, and the count alone would leave the message
+     * interpolating a null.
+     */
+    private function reportRenewalFailures(?DeliveryHeartbeat $heartbeat, QueuedJob $queuedJob, RequestScope $scope): void
+    {
+        if ($heartbeat === null) {
+            return;
+        }
+
+        $lastFailure = $heartbeat->lastFailure();
+
+        if ($lastFailure === null) {
+            return;
+        }
+
+        $failures = $heartbeat->failureCount();
+
+        $this->runBestEffort(fn (): mixed => $scope->get(LoggerInterface::class)->error(
+            "Renewing the reservation for job \"{$queuedJob->class}\" failed {$failures} time(s) while it ran; "
+            . "another worker may have taken the job over: {$lastFailure->getMessage()}",
+            [
+                'exception' => $lastFailure,
+                'job' => ['class' => $queuedJob->class, 'queue' => $queuedJob->queue, 'attempts' => $queuedJob->attempts],
+                'renewalFailures' => $failures,
+            ],
+        ));
     }
 
     /**
