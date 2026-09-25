@@ -66,12 +66,16 @@ following automatically, through the `extra.kinetis` declaration in its
 [kinetis.dev/docs/cli.html](https://kinetis.dev/docs/cli.html)):
 
 - **Commands** on `vendor/bin/kinetis`: `queue:work` (the worker loop,
-  stopping gracefully on SIGTERM once the job in flight finishes),
+  stopping gracefully on SIGTERM once the job in flight finishes;
+  `--connection=<name>` runs a named connection instead of the bound
+  queue),
   `queue:stats` (how many jobs are waiting), and `queue:clear`
   (discard waiting jobs, requires `--force`; refuses on a backend that
   cannot clear — see below).
-- **Service bindings**: with `QUEUE_CONNECTION` set, `QueueInterface` is
-  bound to the selected backend before your own `bootstrap.php` runs —
+- **Service bindings**: with the selector of the connection
+  `QUEUE_CONNECTION_NAME` names set — `QUEUE_CONNECTION` for the
+  `default` connection — `QueueInterface` is bound to that connection's
+  backend before your own `bootstrap.php` runs —
   your registration wins on the same binding — and both
   `ClearableQueueInterface` and core's
   `Kinetis\Events\ListenerInvokerInterface` are bound to whatever
@@ -80,7 +84,7 @@ following automatically, through the `extra.kinetis` declaration in its
   queue, with no second stanza to write. All three are built on first
   use, so an application that never injects a queue builds no backend.
   A backend built that way owns its connection, and this package closes
-  it when the worker ends — see below. Inert when `QUEUE_CONNECTION` is
+  it when the worker ends — see below. Inert when that selector is
   unset, leaving core's synchronous listener invoker in place.
 - **Events**, dispatched by `queue:work` around every job's outcome —
   register a `#[Listener]` for whichever one you need:
@@ -104,12 +108,12 @@ its transport is an HTTP client with no queue-owned connection to close.
 
 Ownership travels with construction, not with the type. A backend's
 `fromConfig()` opens the client or link it hands the queue, so it hands
-over the operation that closes it too, and the backend this package
-binds from `QUEUE_CONNECTION` has its `dispose()` registered on the
-application scope when something first injects it. A constructor called
-directly receives a transport you already own and closes none of it:
-`dispose()` is then a no-op. Build a backend yourself and the disposal
-is yours to register:
+over the operation that closes it too. The backend this package binds
+has its `dispose()` registered on the application scope when something
+first injects it, and so does the one `queue:work --connection=<name>`
+builds. A constructor called directly receives a transport you already
+own and closes none of it: `dispose()` is then a no-op. Build a backend
+yourself and the disposal is yours to register:
 
 ```php
 use Kinetis\Queue\QueueInterface;
@@ -211,17 +215,33 @@ unsettled, rather than settling one a suspended renewal can still reach.
 Read from the environment (or `.env`) via `Kinetis\Config` — by
 `kinetis queue:work` and by this package's bootstrap, which binds
 `QueueInterface` to the selected backend with no application wiring.
+Every connection has its own selector: `QUEUE_CONNECTION` for
+`default`, `QUEUE_<NAME>_CONNECTION` for any other, with no fallback
+from one to the other. The same name scopes the backend's own keys.
 Each backend's own connection details are documented in that backend's
 own package ([`kinetis/queue-redis`](https://github.com/kinetis-dev/queue-redis), [`kinetis/queue-sql`](https://github.com/kinetis-dev/queue-sql),
 [`kinetis/queue-sqs`](https://github.com/kinetis-dev/queue-sqs), [`kinetis/queue-rabbitmq`](https://github.com/kinetis-dev/queue-rabbitmq)) — this package installs
 none of them, so picking `QUEUE_CONNECTION=redis` (say) without also
 `composer require kinetis/queue-redis` fails clearly, naming the
-package to install.
+selector and the package to install.
+
+```
+QUEUE_CONNECTION=redis
+QUEUE_LEDGER_CONNECTION=sql
+```
+
+```sh
+vendor/bin/kinetis queue:work                      # the bound queue
+vendor/bin/kinetis queue:work --connection=ledger  # the ledger connection
+```
+
+A connection name is lowercase ASCII letters and digits, starting with
+a letter.
 
 | Key | Default | Purpose |
 |---|---|---|
-| `QUEUE_CONNECTION` | *(required)* | `redis`, `sql`, `sqs`, or `rabbitmq` — each needs its own package installed. |
-| `QUEUE_CONNECTION_NAME` | `default` | Which named connection block the backend uses. |
+| `QUEUE_CONNECTION` | *(required)* | The `default` connection's backend: `redis`, `sql`, `sqs`, or `rabbitmq` — each needs its own package installed. `QUEUE_<NAME>_CONNECTION` selects a named connection's backend. |
+| `QUEUE_CONNECTION_NAME` | `default` | Which connection the bootstrap binds to `QueueInterface`; `queue:work --connection=<name>` ignores it. |
 | `QUEUE_MAX_ATTEMPTS` | `0` | Worker-level default attempts cap (`0` = no retries); a job's own `push(maxAttempts: ...)` wins. |
 | `QUEUE_RETRY_BASE_DELAY_SECONDS` | `5` | Seconds the first retry waits, doubling per attempt up to a fixed 15-minute ceiling. `0`–`900`; `0` retries immediately. The backend holds the job, so the worker never sleeps. |
 | `QUEUE_POLL_TIMEOUT` | `5` | Seconds `queue:work` waits per poll; must be at least 1, so the worker can periodically check for a shutdown signal. |

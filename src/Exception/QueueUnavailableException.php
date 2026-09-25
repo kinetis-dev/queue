@@ -8,8 +8,8 @@ use RuntimeException;
 
 final class QueueUnavailableException extends RuntimeException
 {
-    public static function missingBackendPackage(string $backend, string $package): self
+    public static function missingBackendPackage(string $key, string $backend, string $package): self
     {
-        return new self("Cannot use QUEUE_CONNECTION=\"{$backend}\": install \"{$package}\" to enable it.");
+        return new self("Cannot use {$key}=\"{$backend}\": install \"{$package}\" to enable it.");
     }
 }

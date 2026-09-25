@@ -10,8 +10,8 @@ use Kinetis\Queue\QueueInterface;
 
 /**
  * Reports how many jobs are waiting on each queue — the "is this backing
- * up?" question, answered against whichever backend QUEUE_CONNECTION
- * selects.
+ * up?" question, answered against the QueueInterface binding: the
+ * connection PackageBootstrap builds, or the application's own queue.
  *
  * Counts exclude jobs a worker currently holds, and include jobs still
  * inside their push() delay; see {@see QueueInterface::size()}. Some

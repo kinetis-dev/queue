@@ -10,9 +10,12 @@ namespace Kinetis\Queue;
  *
  * A queue backend lives for the whole worker, so its connection is
  * application-scoped and has to be closed once when that worker ends.
- * `PackageBootstrap` registers dispose() on the `AppScope` for the
- * backend `QUEUE_CONNECTION` made it build, and for no other instance:
- * a queue an application binds itself belongs to that application.
+ * Whoever builds a queue through a factory registers its dispose() on
+ * the `AppScope`: `PackageBootstrap` for the connection it binds,
+ * `queue:work --connection=<name>` for the connection it builds, and an
+ * application for each queue it builds and binds itself. The bootstrap
+ * and the worker dispose no other instance: a queue an application binds
+ * itself belongs to that application.
  *
  * **Ownership travels with construction, not with the type.** A
  * backend's factory opens the client or link it hands the queue, so it

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Kinetis\Queue;
 
+use InvalidArgumentException;
 use JsonException;
 use Kinetis\Queue\Exception\InvalidQueueArgumentException;
 use Kinetis\Queue\Exception\MalformedJobSettledException;
@@ -13,7 +14,8 @@ use Kinetis\Queue\Exception\MalformedQueuedJobDataException;
  * The shared validation and decode helpers every backend runs, so
  * RedisQueue, SqlQueue, SqsQueue, RabbitMqQueue and SyncQueue agree on
  * what a queue name is, what push()/pop()/release() accept, and what a
- * corrupted stored message looks like.
+ * corrupted stored message looks like, and the connection-name grammar
+ * `PackageBootstrap` and `queue:work` share.
  *
  * The assertion methods are pure — they throw or return nothing, and
  * touch no backend — so a backend calls them before any I/O. The
@@ -30,6 +32,12 @@ final class QueueContract
 
     private const string VALID_NAME_PATTERN = '/^[A-Za-z0-9_-]{1,80}$/D';
 
+    /**
+     * No uppercase and no underscore, so no two names derive the same
+     * QUEUE_{NAME}_* keys — kinetis/migrations' connection-name grammar.
+     */
+    private const string CONNECTION_NAME_PATTERN = '/^[a-z][a-z0-9]*$/D';
+
     // Never instantiated — every method here is static.
     private function __construct() {}
 
@@ -44,6 +52,20 @@ final class QueueContract
 
         if (preg_match(self::VALID_NAME_PATTERN, $queue) !== 1) {
             throw InvalidQueueArgumentException::malformedQueueName($queue, self::MAX_NAME_LENGTH);
+        }
+    }
+
+    /**
+     * $source names where the value came from — an option or a config
+     * key — so the failure points at what to fix.
+     */
+    public static function assertValidConnectionName(string $name, string $source): void
+    {
+        if (preg_match(self::CONNECTION_NAME_PATTERN, $name) !== 1) {
+            throw new InvalidArgumentException(
+                "Invalid connection name \"{$name}\" from {$source}: a connection name is lowercase ASCII "
+                . 'letters and digits, starting with a letter (^[a-z][a-z0-9]*$).',
+            );
         }
     }
 

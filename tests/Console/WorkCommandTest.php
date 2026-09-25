@@ -9,9 +9,13 @@ use Kinetis\Config\Config;
 use Kinetis\Console\CommandArguments;
 use Kinetis\Container\AppScope;
 use Kinetis\Queue\Console\WorkCommand;
+use Kinetis\Queue\Exception\QueueUnavailableException;
+use Kinetis\Queue\QueueInterface;
 use Kinetis\Queue\Tests\Fixtures\NeverCalledQueue;
+use LogicException;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
+use RuntimeException;
 
 final class WorkCommandTest extends TestCase
 {
@@ -39,40 +43,139 @@ final class WorkCommandTest extends TestCase
 
     /**
      * Every config bound is validated before any startup output and
-     * before the queue backend is ever touched — proven here two ways at
-     * once: the "started" line never reaches the output stream, and
-     * NeverCalledQueue throws its own distinct exception if run() ever
-     * reaches the point of constructing a real QueueWorker around it,
-     * which would surface as this test failing with the wrong exception
-     * type rather than silently passing.
+     * before the queue binding is ever resolved — proven here two ways at
+     * once: the "started" line never reaches the output stream, and the
+     * binding throws its own RuntimeException if run() resolves it, which
+     * would surface as this test failing with the wrong exception type
+     * rather than silently passing.
      */
     #[DataProvider('invalidConfigCases')]
-    public function test_invalid_config_produces_no_started_line_and_never_touches_the_queue(string $key, string $value): void
+    public function test_invalid_config_produces_no_started_line_and_never_resolves_the_queue(string $key, string $value): void
     {
-        $output = fopen('php://memory', 'r+');
-        self::assertIsResource($output);
-
-        $app = new AppScope();
-        $app->boot();
-
-        $command = new WorkCommand(
-            $app->createRequestScope(),
-            new NeverCalledQueue(),
-            new Config([$key => $value]),
-            $output,
-        );
+        $output = self::memoryStream();
 
         try {
-            $command->run(CommandArguments::parse([]));
+            self::command(new Config([$key => $value]), $output)->run(CommandArguments::parse([]));
             self::fail('Expected an InvalidArgumentException.');
         } catch (InvalidArgumentException) {
-            // Expected — the whole point of this test. NeverCalledQueue
-            // would throw a different exception type if the ordering
-            // were broken, which this catch block deliberately does not
-            // swallow.
+            // Expected. The binding's RuntimeException is not caught here,
+            // so resolving it fails the test.
         }
 
-        rewind($output);
-        self::assertSame('', (string) stream_get_contents($output));
+        self::assertSame('', self::contents($output));
+    }
+
+    /**
+     * @return iterable<string, array{string, string}>
+     */
+    public static function invalidConnectionOptions(): iterable
+    {
+        yield 'bare' => ['--connection', '--connection needs a value: --connection=<name>.'];
+        yield 'empty' => ['--connection=', '--connection needs a value: --connection=<name>.'];
+        yield 'uppercase' => [
+            '--connection=Jobs',
+            'Invalid connection name "Jobs" from --connection: a connection name is lowercase ASCII letters and '
+            . 'digits, starting with a letter (^[a-z][a-z0-9]*$).',
+        ];
+    }
+
+    #[DataProvider('invalidConnectionOptions')]
+    public function test_an_invalid_connection_option_fails_before_output_and_resolution(string $option, string $message): void
+    {
+        $output = self::memoryStream();
+
+        try {
+            self::command(new Config(['QUEUE_JOBS_CONNECTION' => 'redis']), $output)
+                ->run(CommandArguments::parse([$option]));
+            self::fail('Expected an InvalidArgumentException.');
+        } catch (InvalidArgumentException $exception) {
+            self::assertSame($message, $exception->getMessage());
+        }
+
+        self::assertSame('', self::contents($output));
+    }
+
+    /**
+     * The named connection is built by QueueFactory — reaching it for the
+     * uninstalled backend, naming the scoped selector, is the proof — and
+     * the default binding, which would throw its own message, is never
+     * resolved.
+     */
+    public function test_a_named_connection_is_built_without_resolving_the_default_binding(): void
+    {
+        $output = self::memoryStream();
+
+        try {
+            self::command(new Config(['QUEUE_JOBS_CONNECTION' => 'redis']), $output)
+                ->run(CommandArguments::parse(['--connection=jobs']));
+            self::fail('Expected a QueueUnavailableException.');
+        } catch (QueueUnavailableException $exception) {
+            self::assertSame(
+                'Cannot use QUEUE_JOBS_CONNECTION="redis": install "kinetis/queue-redis" to enable it.',
+                $exception->getMessage(),
+            );
+        }
+
+        self::assertSame('', self::contents($output));
+    }
+
+    /**
+     * Without --connection the worker runs the queue the application
+     * bound: NeverCalledQueue's pop() failure propagating out of the
+     * loop is what proves this instance, and no other, was the one run.
+     */
+    public function test_no_connection_option_runs_the_application_bound_queue(): void
+    {
+        $output = self::memoryStream();
+
+        $app = new AppScope();
+        $app->instance(QueueInterface::class, new NeverCalledQueue());
+        $app->boot();
+
+        $command = new WorkCommand($app->createRequestScope(), new Config([]), $output, self::memoryStream());
+
+        try {
+            $command->run(CommandArguments::parse(['--queue=high,default']));
+            self::fail('Expected the application queue to be popped.');
+        } catch (LogicException $exception) {
+            self::assertSame('The queue backend must not be touched.', $exception->getMessage());
+        }
+
+        self::assertSame("Queue worker started, listening on: high, default\n", self::contents($output));
+    }
+
+    /**
+     * @param resource $output
+     */
+    private static function command(Config $config, mixed $output): WorkCommand
+    {
+        $app = new AppScope();
+        $app->bind(QueueInterface::class, static function (): QueueInterface {
+            throw new RuntimeException('The default queue binding must not be resolved.');
+        });
+        $app->boot();
+
+        return new WorkCommand($app->createRequestScope(), $config, $output, self::memoryStream());
+    }
+
+    /**
+     * @return resource
+     */
+    private static function memoryStream(): mixed
+    {
+        $stream = fopen('php://memory', 'r+');
+        self::assertIsResource($stream);
+
+        return $stream;
+    }
+
+    /**
+     * @param resource $stream
+     */
+    private static function contents(mixed $stream): string
+    {
+        rewind($stream);
+
+        return (string) stream_get_contents($stream);
     }
 }

@@ -6,6 +6,7 @@ namespace Kinetis\Queue\Tests;
 
 use InvalidArgumentException;
 use Kinetis\Config\Config;
+use Kinetis\Config\Exception\MissingConfigException;
 use Kinetis\Queue\Exception\QueueUnavailableException;
 use Kinetis\Queue\QueueFactory;
 use PHPUnit\Framework\Attributes\DataProvider;
@@ -48,7 +49,39 @@ final class QueueFactoryTest extends TestCase
         $config = new Config(['QUEUE_CONNECTION' => $connection]);
 
         $this->expectException(QueueUnavailableException::class);
-        $this->expectExceptionMessage("install \"{$package}\"");
+        $this->expectExceptionMessage("Cannot use QUEUE_CONNECTION=\"{$connection}\": install \"{$package}\" to enable it.");
         QueueFactory::fromConfig($config);
+    }
+
+    /**
+     * The name reaches the selector, not just the backend: `jobs` reads
+     * QUEUE_JOBS_CONNECTION, and the failure names that key so the
+     * operator edits the one that was read.
+     */
+    public function test_a_named_connection_is_selected_by_its_scoped_key(): void
+    {
+        $config = new Config(['QUEUE_JOBS_CONNECTION' => 'redis']);
+
+        $this->expectException(QueueUnavailableException::class);
+        $this->expectExceptionMessage('Cannot use QUEUE_JOBS_CONNECTION="redis": install "kinetis/queue-redis" to enable it.');
+        QueueFactory::fromConfig($config, 'jobs');
+    }
+
+    public function test_the_global_selector_does_not_select_a_named_connection(): void
+    {
+        $config = new Config(['QUEUE_CONNECTION' => 'redis']);
+
+        $this->expectException(MissingConfigException::class);
+        $this->expectExceptionMessage('Missing required config value "QUEUE_JOBS_CONNECTION".');
+        QueueFactory::fromConfig($config, 'jobs');
+    }
+
+    public function test_an_unrecognized_named_connection_names_its_scoped_key(): void
+    {
+        $config = new Config(['QUEUE_JOBS_CONNECTION' => 'mongodb']);
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('QUEUE_JOBS_CONNECTION must be "redis", "sql", "sqs", or "rabbitmq".');
+        QueueFactory::fromConfig($config, 'jobs');
     }
 }

@@ -17,7 +17,7 @@ use Throwable;
  * returns null (nothing is ever stored); ack()/release()/fail() are
  * no-ops, since QueueWorker only calls them after a non-null pop().
  *
- * Not selectable via QUEUE_CONNECTION — there is nothing for a worker
+ * No queue connection selector accepts it — there is nothing for a worker
  * process to do against a backend that never stores anything. Construct
  * and register it in your own bootstrap instead, typically gated on
  * APP_ENV.
