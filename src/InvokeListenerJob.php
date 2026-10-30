@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Kinetis\Queue;
 
 use Kinetis\Container\RequestScope;
+use Kinetis\Queue\Attributes\Sensitive;
 
 /**
  * The job QueuedListenerInvoker pushes for a ShouldQueue listener —
@@ -21,6 +22,10 @@ use Kinetis\Container\RequestScope;
  * output, so serializing this job walks values that are already wire
  * values and passes them through unchanged. The event's own constructor
  * parameter types are what restore it on the worker side.
+ *
+ * $eventArgs is #[Sensitive] because redaction reflects this class, not
+ * the event's: a final failure logs which listener and event failed, never
+ * what the event carried.
  */
 final readonly class InvokeListenerJob implements Job
 {
@@ -33,6 +38,7 @@ final readonly class InvokeListenerJob implements Job
         private string $listenerClass,
         private string $method,
         private string $eventClass,
+        #[Sensitive]
         private array $eventArgs,
     ) {}
 

@@ -50,6 +50,23 @@ final class InvokeListenerJobTest extends TestCase
         self::assertEquals($original, $restored);
     }
 
+    public function test_a_failure_log_redacts_the_event_arguments_and_keeps_what_failed(): void
+    {
+        $serialized = JobSerializer::serialize(
+            new InvokeListenerJob(TestListener::class, 'onTestEvent', TestEvent::class, ['message' => 'customer@example.com']),
+        );
+
+        self::assertSame(
+            [
+                'listenerClass' => TestListener::class,
+                'method' => 'onTestEvent',
+                'eventClass' => TestEvent::class,
+                'eventArgs' => JobSerializer::REDACTED,
+            ],
+            JobSerializer::redact($serialized['class'], $serialized['args']),
+        );
+    }
+
     /**
      * End to end, not just at the serialized-shape level: an event
      * carrying a BackedEnum case and a DateTimeImmutable survives being
