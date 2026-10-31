@@ -72,6 +72,9 @@ final class InMemoryQueue implements ClearableQueueInterface
      */
     public bool $ackShouldThrow = false;
 
+    /** The same for the next fail() call. */
+    public bool $failShouldThrow = false;
+
     public function push(Job $job, int $delaySeconds = 0, string $queue = 'default', ?int $maxAttempts = null): void
     {
         $this->pushSpent($job, completedAttempts: 0, maxAttempts: $maxAttempts, queue: $queue);
@@ -163,6 +166,12 @@ final class InMemoryQueue implements ClearableQueueInterface
             $this->failShouldThrowStale = false;
 
             throw StaleJobHandleException::forSettlement(JobSettlement::Fail, $job->queue);
+        }
+
+        if ($this->failShouldThrow) {
+            $this->failShouldThrow = false;
+
+            throw new RuntimeException('fail() itself failed');
         }
 
         /** @var int $handle */

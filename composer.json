@@ -22,7 +22,8 @@
         "vimeo/psalm": "^6.17"
     },
     "suggest": {
-        "ext-pcntl": "Lets `kinetis queue:work` stop gracefully on SIGTERM, finishing the job in flight instead of being killed mid-job. Not loaded by default in the official PHP Docker images."
+        "ext-pcntl": "Lets `kinetis queue:work` stop gracefully on SIGTERM, finishing the job in flight instead of being killed mid-job. Not loaded by default in the official PHP Docker images.",
+        "kinetis/queue-failed-jobs": "Records every job the worker gives up on in a MySQL/Postgres table before the backend deletes it, with queue:failed, queue:retry, queue:forget and queue:prune."
     },
     "autoload": {
         "psr-4": {

@@ -10,6 +10,7 @@ use Kinetis\Console\Attributes\Command;
 use Kinetis\Console\CommandArguments;
 use Kinetis\Container\RequestScope;
 use Kinetis\Queue\DisposableQueueInterface;
+use Kinetis\Queue\FailedJobRecorderInterface;
 use Kinetis\Queue\QueueContract;
 use Kinetis\Queue\QueueFactory;
 use Kinetis\Queue\QueueInterface;
@@ -30,6 +31,10 @@ use Kinetis\Queue\QueueWorker;
  * keys describe, whatever the application bound. The queue built here
  * is this command's to close: a disposable one registers its dispose()
  * on the application scope, which the CLI disposes on every exit path.
+ *
+ * A FailedJobRecorderInterface bound on the application scope is handed
+ * to the worker together with the --connection value, so a job the
+ * worker gives up on is recorded with the target a retry pushes onto.
  *
  * Constructor-injects RequestScope (safe per #[Command] dispatch's own
  * per-invocation scope; see BearerAuthMiddleware's identical pattern for
@@ -88,6 +93,7 @@ final readonly class WorkCommand
         QueueWorker::assertValidRetryBaseDelay($retryBaseDelaySeconds);
         QueueWorker::assertValidPollTimeout($pollTimeoutSeconds);
 
+        $failedJobs = $this->failedJobRecorder();
         $queue = $this->queue($connection);
 
         fwrite($this->output, 'Queue worker started, listening on: ' . implode(', ', $queues) . "\n");
@@ -99,7 +105,7 @@ final readonly class WorkCommand
                 . "A deploy will interrupt whatever job is running. Install pcntl to avoid that.\n",
             );
         }
-        new QueueWorker($this->scope->appScope(), $queue, $defaultMaxAttempts, $retryBaseDelaySeconds)
+        new QueueWorker($this->scope->appScope(), $queue, $defaultMaxAttempts, $retryBaseDelaySeconds, $failedJobs, $connection)
             ->run($pollTimeoutSeconds, $queues);
         fwrite($this->output, "Queue worker stopped.\n");
 
@@ -121,6 +127,25 @@ final readonly class WorkCommand
         QueueContract::assertValidConnectionName($name, '--connection');
 
         return $name;
+    }
+
+    /**
+     * Only an explicit binding counts — AppScope::has() never autowires —
+     * so without kinetis/queue-failed-jobs (or an application's own
+     * binding) the worker records nothing. Resolved here, before any
+     * startup output, so a recorder whose configuration is invalid stops
+     * the command before "started".
+     */
+    private function failedJobRecorder(): ?FailedJobRecorderInterface
+    {
+        $app = $this->scope->appScope();
+
+        if (!$app->has(FailedJobRecorderInterface::class)) {
+            return null;
+        }
+
+        /** @var FailedJobRecorderInterface */
+        return $app->get(FailedJobRecorderInterface::class);
     }
 
     private function queue(?string $connection): QueueInterface

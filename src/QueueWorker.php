@@ -44,7 +44,18 @@ use Throwable;
  * telemetry backend or a failing logger can never block a transition,
  * cause a second one, or reclassify a success as a failure. The
  * real-failure log line runs ahead of the transition, describing the
- * outcome rather than deciding it, and is contained the same way.
+ * outcome rather than deciding it, and is contained the same way. The
+ * failed-job record below is not an observer and is not contained.
+ *
+ * **A job given up on is recorded before it is deleted.** With a
+ * FailedJobRecorderInterface, the exhausted path calls record() after the
+ * log line and before fail(). record() is a durable write rather than an
+ * observer, so it is not contained: when it throws, nothing is settled
+ * and the exception propagates, leaving the job with the backend to be
+ * redelivered once its reservation expires. A job the worker gives up on
+ * is therefore always either still held by the backend or recorded,
+ * possibly both — never neither. The worker never removes a record, so a
+ * stale or throwing fail() leaves it in place.
  *
  * **A reservation is renewed while its job runs.** A backend that
  * declares RenewableQueueInterface — Redis, SQL and SQS — gets a
@@ -126,14 +137,25 @@ final class QueueWorker
      */
     private readonly ?RenewableQueueInterface $renewableQueue;
 
+    /**
+     * $connection is the queue connection name $queue was built for, null
+     * when it is the bound QueueInterface. It is written onto every
+     * FailedJob so a retry pushes onto the same target.
+     */
     public function __construct(
         private readonly AppScope $app,
         private readonly QueueInterface $queue,
         private readonly int $defaultMaxAttempts = 0,
         private readonly int $retryBaseDelaySeconds = 5,
+        private readonly ?FailedJobRecorderInterface $failedJobs = null,
+        private readonly ?string $connection = null,
     ) {
         self::assertValidDefaultMaxAttempts($defaultMaxAttempts);
         self::assertValidRetryBaseDelay($retryBaseDelaySeconds);
+
+        if ($connection !== null) {
+            QueueContract::assertValidConnectionName($connection, '$connection');
+        }
 
         $this->renewableQueue = $queue instanceof RenewableQueueInterface ? $queue : null;
     }
@@ -417,8 +439,9 @@ final class QueueWorker
 
         // A job that will be retried is still held by the backend with
         // its payload intact, so logging the arguments adds nothing
-        // recoverable. They are the only surviving record once the job is
-        // given up on, and are redacted there per #[Sensitive]. redact()
+        // recoverable. Once the job is given up on they are the log's
+        // only account of it — a recorder, when bound, keeps the raw
+        // payload instead — and are redacted there per #[Sensitive]. redact()
         // already fails closed when the class no longer autoloads;
         // reflecting one that does can still throw, and that must not
         // reach the transition below, so it falls back to the same
@@ -442,6 +465,20 @@ final class QueueWorker
             ['exception' => $e, 'job' => $context],
         ));
 
+        // Ahead of fail() and outside runBestEffort(): a record that
+        // could not be written must leave the job with the backend.
+        $failedJobId = $exhausted ? $this->failedJobs?->record(new FailedJob(
+            $this->connection,
+            $queuedJob->queue,
+            $queuedJob->class,
+            $queuedJob->args,
+            $queuedJob->maxAttempts,
+            $queuedJob->attempts,
+            $e::class,
+            $e->getMessage(),
+            time(),
+        )) : null;
+
         $operation = $exhausted ? JobSettlement::Fail : JobSettlement::Release;
 
         if (!$this->transition($operation, $queuedJob, $retryDelaySeconds, $e, $scope, $telemetry, $jobToken)) {
@@ -450,7 +487,7 @@ final class QueueWorker
 
         $this->dispatch(
             $exhausted
-                ? new JobFailedPermanently($queuedJob->class, $queuedJob->queue, $queuedJob->attempts, $e, $redactedArgs)
+                ? new JobFailedPermanently($queuedJob->class, $queuedJob->queue, $queuedJob->attempts, $e, $redactedArgs, $failedJobId)
                 : new JobReleased($queuedJob->class, $queuedJob->queue, $queuedJob->attempts, $e),
             $exhausted ? 'JobFailedPermanently' : 'JobReleased',
             $queuedJob,

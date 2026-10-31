@@ -10,6 +10,7 @@ use Kinetis\Console\CommandArguments;
 use Kinetis\Container\AppScope;
 use Kinetis\Queue\Console\WorkCommand;
 use Kinetis\Queue\Exception\QueueUnavailableException;
+use Kinetis\Queue\FailedJobRecorderInterface;
 use Kinetis\Queue\QueueInterface;
 use Kinetis\Queue\Tests\Fixtures\NeverCalledQueue;
 use LogicException;
@@ -142,6 +143,36 @@ final class WorkCommandTest extends TestCase
         }
 
         self::assertSame("Queue worker started, listening on: high, default\n", self::contents($output));
+    }
+
+    /**
+     * A bound recorder is resolved ahead of the queue and the startup
+     * line, so a recorder whose configuration is invalid stops the
+     * command before it reports itself started.
+     */
+    public function test_a_bound_recorder_that_cannot_be_built_fails_before_the_started_line(): void
+    {
+        $output = self::memoryStream();
+
+        $app = new AppScope();
+        $app->bind(FailedJobRecorderInterface::class, static function (): FailedJobRecorderInterface {
+            throw new InvalidArgumentException('The recorder configuration is invalid.');
+        });
+        $app->bind(QueueInterface::class, static function (): QueueInterface {
+            throw new RuntimeException('The default queue binding must not be resolved.');
+        });
+        $app->boot();
+
+        $command = new WorkCommand($app->createRequestScope(), new Config([]), $output, self::memoryStream());
+
+        try {
+            $command->run(CommandArguments::parse([]));
+            self::fail('Expected the recorder failure.');
+        } catch (InvalidArgumentException $exception) {
+            self::assertSame('The recorder configuration is invalid.', $exception->getMessage());
+        }
+
+        self::assertSame('', self::contents($output));
     }
 
     /**

@@ -28,7 +28,9 @@ priority-ordered queues, bounded retries (`maxAttempts`, defaulting to
 no retries at all) with an exponential backoff the backend holds the job
 through, and named connections come built in. A job given up on is
 logged with its arguments, minus any constructor parameter marked
-`Kinetis\Queue\Attributes\Sensitive`. Every backend — Redis
+`Kinetis\Queue\Attributes\Sensitive`, and, with
+[`kinetis/queue-failed-jobs`](https://github.com/kinetis-dev/queue-failed-jobs)
+installed, recorded for retry before the backend deletes it. Every backend — Redis
 ([`kinetis/queue-redis`](https://github.com/kinetis-dev/queue-redis)), SQL ([`kinetis/queue-sql`](https://github.com/kinetis-dev/queue-sql)), Amazon SQS
 ([`kinetis/queue-sqs`](https://github.com/kinetis-dev/queue-sqs)), and RabbitMQ ([`kinetis/queue-rabbitmq`](https://github.com/kinetis-dev/queue-rabbitmq)) — lives in
 its own separate package; this one carries only the contract, the
@@ -89,13 +91,17 @@ following automatically, through the `extra.kinetis` declaration in its
 - **Events**, dispatched by `queue:work` around every job's outcome —
   register a `#[Listener]` for whichever one you need:
   `Kinetis\Queue\Events\JobSucceeded`, `JobReleased` (a job failed but
-  will retry), `JobFailedPermanently` (attempts exhausted), and
+  will retry), `JobFailedPermanently` (attempts exhausted; carries the
+  failed-job record's id when a recorder is bound), and
   `JobSettlementLost` (the backend refused the settlement because this
   worker's delivery was already over). See
   [kinetis.dev/docs/events.html](https://kinetis.dev/docs/events.html)
   for the full list across every package.
 
 Nothing else — no routes, middleware, event listeners, or MCP tools.
+`Kinetis\Queue\FailedJobRecorderInterface` is the contract `queue:work`
+hands a job it gives up on to, when one is bound; see
+[kinetis.dev/docs/queue-failed-jobs.html](https://kinetis.dev/docs/queue-failed-jobs.html).
 
 ## A queue owns the connection its factory opened
 
