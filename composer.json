@@ -19,7 +19,7 @@
         "infection/infection": "^0.35.0",
         "phpstan/phpstan": "^2.2.8",
         "phpunit/phpunit": "^13.3.3",
-        "vimeo/psalm": "^6.17"
+        "vimeo/psalm": "^7.0"
     },
     "suggest": {
         "ext-pcntl": "Lets `kinetis queue:work` stop gracefully on SIGTERM, finishing the job in flight instead of being killed mid-job. Not loaded by default in the official PHP Docker images.",
