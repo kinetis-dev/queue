@@ -94,7 +94,8 @@ following automatically, through the `extra.kinetis` declaration in its
   will retry), `JobFailedPermanently` (attempts exhausted; carries the
   failed-job record's id when a recorder is bound), and
   `JobSettlementLost` (the backend refused the settlement because this
-  worker's delivery was already over). See
+  worker's delivery was already over). Each carries `durationMs`, the
+  job handler's wall-clock time in milliseconds. See
   [kinetis.dev/docs/events.html](https://kinetis.dev/docs/events.html)
   for the full list across every package.
 

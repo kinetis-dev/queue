@@ -33,6 +33,7 @@ use Kinetis\Queue\Tests\Fixtures\SensitiveConstructorFailureJob;
 use Kinetis\Queue\Tests\Fixtures\SensitiveDateJob;
 use Kinetis\Queue\Tests\Fixtures\SensitiveFailingJob;
 use Kinetis\Queue\Tests\Fixtures\SequencedPopQueue;
+use Kinetis\Queue\Tests\Fixtures\SleepingJob;
 use Kinetis\Queue\Tests\Fixtures\ThrowingLogger;
 use Kinetis\Queue\Tests\Fixtures\ThrowingQueueEventListener;
 use Kinetis\Queue\Tests\Fixtures\ThrowingTelemetry;
@@ -937,8 +938,47 @@ final class QueueWorkerTest extends TestCase
         self::assertSame(RecordingJob::class, $log->succeeded[0]->class);
         self::assertSame('reports', $log->succeeded[0]->queue);
         self::assertSame(1, $log->succeeded[0]->attempts);
+        self::assertGreaterThanOrEqual(0.0, $log->succeeded[0]->durationMs);
         self::assertSame([], $log->released);
         self::assertSame([], $log->failedPermanently);
+    }
+
+    /**
+     * durationMs is the handler's own wall-clock time: a handler that
+     * sleeps 20 ms must report at least that, on the success path and on
+     * the throw path alike, and on the event that replaces them when the
+     * settlement is lost.
+     */
+    public function test_duration_ms_measures_the_handler_on_every_outcome(): void
+    {
+        [$app, $log] = $this->appWithEventLog();
+
+        // A fresh queue per outcome: a released job would otherwise be
+        // popped again ahead of the next push.
+        $run = static function (SleepingJob $job, int $maxAttempts, bool $staleAck = false) use ($app): void {
+            $queue = new InMemoryQueue();
+            $queue->push($job, maxAttempts: $maxAttempts);
+
+            $queue->ackShouldThrowStale = $staleAck;
+
+            (new QueueWorker($app, $queue))->processNext();
+        };
+
+        $run(new SleepingJob(20_000), 1);
+        $run(new SleepingJob(20_000, fail: true), 2);
+        $run(new SleepingJob(20_000, fail: true), 1);
+        $run(new SleepingJob(20_000), 1, staleAck: true);
+
+        self::assertCount(1, $log->succeeded);
+        self::assertCount(1, $log->released);
+        self::assertCount(1, $log->failedPermanently);
+        self::assertCount(1, $log->settlementLost);
+
+        foreach ([$log->succeeded[0], $log->released[0], $log->failedPermanently[0], $log->settlementLost[0]] as $event) {
+            self::assertIsFloat($event->durationMs);
+            self::assertGreaterThanOrEqual(19.0, $event->durationMs, $event::class);
+            self::assertLessThan(5_000.0, $event->durationMs, $event::class);
+        }
     }
 
     public function test_a_retried_job_dispatches_job_released(): void
@@ -953,6 +993,7 @@ final class QueueWorkerTest extends TestCase
         self::assertSame(FailingJob::class, $log->released[0]->class);
         self::assertSame('default', $log->released[0]->queue);
         self::assertSame(1, $log->released[0]->attempts);
+        self::assertGreaterThanOrEqual(0.0, $log->released[0]->durationMs);
         self::assertInstanceOf(RuntimeException::class, $log->released[0]->exception);
         self::assertSame('deliberate failure', $log->released[0]->exception->getMessage());
         self::assertSame([], $log->succeeded);
@@ -984,6 +1025,7 @@ final class QueueWorkerTest extends TestCase
         self::assertSame('default', $log->settlementLost[0]->queue);
         self::assertSame(1, $log->settlementLost[0]->attempts);
         self::assertSame(JobSettlement::Release, $log->settlementLost[0]->operation);
+        self::assertGreaterThanOrEqual(0.0, $log->settlementLost[0]->durationMs);
         self::assertSame(JobSettlement::Release, $log->settlementLost[0]->stale->operation);
         self::assertInstanceOf(RuntimeException::class, $log->settlementLost[0]->failure);
         self::assertSame('deliberate failure', $log->settlementLost[0]->failure->getMessage());

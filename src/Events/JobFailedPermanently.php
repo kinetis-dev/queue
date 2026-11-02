@@ -20,6 +20,9 @@ use Throwable;
  * $args is the same redacted array the log entry carries — every
  * constructor parameter marked #[Kinetis\Queue\Attributes\Sensitive]
  * comes through as a fixed placeholder, not the real value.
+ *
+ * $durationMs is the wall-clock time of the job's handler in this worker,
+ * in milliseconds; it excludes pop, renewal stop, and settlement.
  */
 final readonly class JobFailedPermanently
 {
@@ -34,5 +37,6 @@ final readonly class JobFailedPermanently
         public Throwable $exception,
         public array $args,
         public ?string $failedJobId,
+        public float $durationMs,
     ) {}
 }

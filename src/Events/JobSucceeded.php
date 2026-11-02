@@ -9,6 +9,9 @@ namespace Kinetis\Queue\Events;
  * returns without throwing and the backend has ack()'d it — one hook for
  * "any job finished" instead of instrumenting every job class's own
  * handle().
+ *
+ * $durationMs is the wall-clock time of the job's handler in this worker,
+ * in milliseconds; it excludes pop, renewal stop, and settlement.
  */
 final readonly class JobSucceeded
 {
@@ -19,5 +22,6 @@ final readonly class JobSucceeded
         public string $class,
         public string $queue,
         public int $attempts,
+        public float $durationMs,
     ) {}
 }

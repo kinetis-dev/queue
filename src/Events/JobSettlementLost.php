@@ -25,6 +25,9 @@ use Throwable;
  * A listener's useful reading of this is "another worker may run, or may
  * already have run, this same job" — at-least-once delivery becoming
  * visible rather than a new failure mode.
+ *
+ * $durationMs is the wall-clock time of the job's handler in this worker,
+ * in milliseconds; it excludes pop, renewal stop, and settlement.
  */
 final readonly class JobSettlementLost
 {
@@ -37,6 +40,7 @@ final readonly class JobSettlementLost
         public int $attempts,
         public JobSettlement $operation,
         public StaleJobHandleException $stale,
+        public float $durationMs,
         public ?Throwable $failure = null,
     ) {}
 }

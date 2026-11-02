@@ -348,26 +348,29 @@ final class QueueWorker
                 ? DeliveryHeartbeat::start($this->renewableQueue, $queuedJob)
                 : null;
 
+            $startedAt = hrtime(true);
+
             try {
                 JobInvoker::invoke(JobSerializer::deserializeJob($queuedJob->class, $queuedJob->args), $scope);
             } catch (Throwable $e) {
                 $failure = $e;
             } finally {
+                $durationMs = (hrtime(true) - $startedAt) / 1_000_000;
                 $heartbeat?->stop();
             }
 
             try {
                 if ($failure === null) {
-                    if ($this->transition(JobSettlement::Ack, $queuedJob, 0, null, $scope, $telemetry, $jobToken)) {
+                    if ($this->transition(JobSettlement::Ack, $queuedJob, 0, null, $durationMs, $scope, $telemetry, $jobToken)) {
                         $this->dispatch(
-                            new JobSucceeded($queuedJob->class, $queuedJob->queue, $queuedJob->attempts),
+                            new JobSucceeded($queuedJob->class, $queuedJob->queue, $queuedJob->attempts, $durationMs),
                             'JobSucceeded',
                             $queuedJob,
                             $scope,
                         );
                     }
                 } else {
-                    $this->handleFailure($queuedJob, $failure, $scope, $telemetry, $jobToken);
+                    $this->handleFailure($queuedJob, $failure, $durationMs, $scope, $telemetry, $jobToken);
                 }
             } finally {
                 // In a finally so a settlement that throws still leaves
@@ -419,7 +422,7 @@ final class QueueWorker
      * settles with fail(), which takes no delay, so nothing about the
      * schedule can affect a job this worker is giving up on.
      */
-    private function handleFailure(QueuedJob $queuedJob, Throwable $e, RequestScope $scope, Telemetry $telemetry, mixed $jobToken): void
+    private function handleFailure(QueuedJob $queuedJob, Throwable $e, float $durationMs, RequestScope $scope, Telemetry $telemetry, mixed $jobToken): void
     {
         $exhausted = $queuedJob->attempts >= ($queuedJob->maxAttempts ?? $this->defaultMaxAttempts);
         $retryDelaySeconds = $exhausted ? 0 : $this->retryDelaySeconds($queuedJob->attempts);
@@ -481,14 +484,14 @@ final class QueueWorker
 
         $operation = $exhausted ? JobSettlement::Fail : JobSettlement::Release;
 
-        if (!$this->transition($operation, $queuedJob, $retryDelaySeconds, $e, $scope, $telemetry, $jobToken)) {
+        if (!$this->transition($operation, $queuedJob, $retryDelaySeconds, $e, $durationMs, $scope, $telemetry, $jobToken)) {
             return;
         }
 
         $this->dispatch(
             $exhausted
-                ? new JobFailedPermanently($queuedJob->class, $queuedJob->queue, $queuedJob->attempts, $e, $redactedArgs, $failedJobId)
-                : new JobReleased($queuedJob->class, $queuedJob->queue, $queuedJob->attempts, $e),
+                ? new JobFailedPermanently($queuedJob->class, $queuedJob->queue, $queuedJob->attempts, $e, $redactedArgs, $failedJobId, $durationMs)
+                : new JobReleased($queuedJob->class, $queuedJob->queue, $queuedJob->attempts, $e, $durationMs),
             $exhausted ? 'JobFailedPermanently' : 'JobReleased',
             $queuedJob,
             $scope,
@@ -510,6 +513,7 @@ final class QueueWorker
         QueuedJob $queuedJob,
         int $releaseDelaySeconds,
         ?Throwable $failure,
+        float $durationMs,
         RequestScope $scope,
         Telemetry $telemetry,
         mixed $jobToken,
@@ -521,7 +525,7 @@ final class QueueWorker
                 JobSettlement::Fail => $this->queue->fail($queuedJob),
             };
         } catch (StaleJobHandleException $stale) {
-            $this->reportSettlementLost($queuedJob, $operation, $stale, $failure, $scope, $telemetry, $jobToken);
+            $this->reportSettlementLost($queuedJob, $operation, $stale, $failure, $durationMs, $scope, $telemetry, $jobToken);
 
             return false;
         }
@@ -556,6 +560,7 @@ final class QueueWorker
         JobSettlement $operation,
         StaleJobHandleException $stale,
         ?Throwable $failure,
+        float $durationMs,
         RequestScope $scope,
         Telemetry $telemetry,
         mixed $jobToken,
@@ -572,7 +577,7 @@ final class QueueWorker
         $this->recordFinished($telemetry, $jobToken, $operation, $failure ?? $stale, $scope);
 
         $this->dispatch(
-            new JobSettlementLost($queuedJob->class, $queuedJob->queue, $queuedJob->attempts, $operation, $stale, $failure),
+            new JobSettlementLost($queuedJob->class, $queuedJob->queue, $queuedJob->attempts, $operation, $stale, $durationMs, $failure),
             'JobSettlementLost',
             $queuedJob,
             $scope,

@@ -25,6 +25,9 @@ use Throwable;
  * acts on the failure having happened, and the delay is a floor the
  * backend may exceed, so it would be a number no listener could act on.
  * The failure log line reports it for an operator instead.
+ *
+ * $durationMs is the wall-clock time of the job's handler in this worker,
+ * in milliseconds; it excludes pop, renewal stop, and settlement.
  */
 final readonly class JobReleased
 {
@@ -36,5 +39,6 @@ final readonly class JobReleased
         public string $queue,
         public int $attempts,
         public Throwable $exception,
+        public float $durationMs,
     ) {}
 }
