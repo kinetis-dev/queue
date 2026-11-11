@@ -12,6 +12,7 @@ use Kinetis\Queue\Console\WorkCommand;
 use Kinetis\Queue\Exception\QueueUnavailableException;
 use Kinetis\Queue\FailedJobRecorderInterface;
 use Kinetis\Queue\QueueInterface;
+use Kinetis\Queue\Tests\Fixtures\CommandOutput;
 use Kinetis\Queue\Tests\Fixtures\NeverCalledQueue;
 use LogicException;
 use PHPUnit\Framework\Attributes\DataProvider;
@@ -53,7 +54,7 @@ final class WorkCommandTest extends TestCase
     #[DataProvider('invalidConfigCases')]
     public function test_invalid_config_produces_no_started_line_and_never_resolves_the_queue(string $key, string $value): void
     {
-        $output = self::memoryStream();
+        $output = new CommandOutput();
 
         try {
             self::command(new Config([$key => $value]), $output)->run(CommandArguments::parse([]));
@@ -63,7 +64,7 @@ final class WorkCommandTest extends TestCase
             // so resolving it fails the test.
         }
 
-        self::assertSame('', self::contents($output));
+        self::assertSame('', $output->takeStdout());
     }
 
     /**
@@ -83,7 +84,7 @@ final class WorkCommandTest extends TestCase
     #[DataProvider('invalidConnectionOptions')]
     public function test_an_invalid_connection_option_fails_before_output_and_resolution(string $option, string $message): void
     {
-        $output = self::memoryStream();
+        $output = new CommandOutput();
 
         try {
             self::command(new Config(['QUEUE_JOBS_CONNECTION' => 'redis']), $output)
@@ -93,7 +94,7 @@ final class WorkCommandTest extends TestCase
             self::assertSame($message, $exception->getMessage());
         }
 
-        self::assertSame('', self::contents($output));
+        self::assertSame('', $output->takeStdout());
     }
 
     /**
@@ -104,7 +105,7 @@ final class WorkCommandTest extends TestCase
      */
     public function test_a_named_connection_is_built_without_resolving_the_default_binding(): void
     {
-        $output = self::memoryStream();
+        $output = new CommandOutput();
 
         try {
             self::command(new Config(['QUEUE_JOBS_CONNECTION' => 'redis']), $output)
@@ -117,7 +118,7 @@ final class WorkCommandTest extends TestCase
             );
         }
 
-        self::assertSame('', self::contents($output));
+        self::assertSame('', $output->takeStdout());
     }
 
     /**
@@ -127,13 +128,13 @@ final class WorkCommandTest extends TestCase
      */
     public function test_no_connection_option_runs_the_application_bound_queue(): void
     {
-        $output = self::memoryStream();
+        $output = new CommandOutput();
 
         $app = new AppScope();
         $app->instance(QueueInterface::class, new NeverCalledQueue());
         $app->boot();
 
-        $command = new WorkCommand($app->createRequestScope(), new Config([]), $output, self::memoryStream());
+        $command = new WorkCommand($app->createRequestScope(), new Config([]), $output->output);
 
         try {
             $command->run(CommandArguments::parse(['--queue=high,default']));
@@ -142,7 +143,7 @@ final class WorkCommandTest extends TestCase
             self::assertSame('The queue backend must not be touched.', $exception->getMessage());
         }
 
-        self::assertSame("Queue worker started, listening on: high, default\n", self::contents($output));
+        self::assertSame("Queue worker started, listening on: high, default\n", $output->takeStdout());
     }
 
     /**
@@ -152,7 +153,7 @@ final class WorkCommandTest extends TestCase
      */
     public function test_a_bound_recorder_that_cannot_be_built_fails_before_the_started_line(): void
     {
-        $output = self::memoryStream();
+        $output = new CommandOutput();
 
         $app = new AppScope();
         $app->bind(FailedJobRecorderInterface::class, static function (): FailedJobRecorderInterface {
@@ -163,7 +164,7 @@ final class WorkCommandTest extends TestCase
         });
         $app->boot();
 
-        $command = new WorkCommand($app->createRequestScope(), new Config([]), $output, self::memoryStream());
+        $command = new WorkCommand($app->createRequestScope(), new Config([]), $output->output);
 
         try {
             $command->run(CommandArguments::parse([]));
@@ -172,13 +173,10 @@ final class WorkCommandTest extends TestCase
             self::assertSame('The recorder configuration is invalid.', $exception->getMessage());
         }
 
-        self::assertSame('', self::contents($output));
+        self::assertSame('', $output->takeStdout());
     }
 
-    /**
-     * @param resource $output
-     */
-    private static function command(Config $config, mixed $output): WorkCommand
+    private static function command(Config $config, CommandOutput $output): WorkCommand
     {
         $app = new AppScope();
         $app->bind(QueueInterface::class, static function (): QueueInterface {
@@ -186,27 +184,6 @@ final class WorkCommandTest extends TestCase
         });
         $app->boot();
 
-        return new WorkCommand($app->createRequestScope(), $config, $output, self::memoryStream());
-    }
-
-    /**
-     * @return resource
-     */
-    private static function memoryStream(): mixed
-    {
-        $stream = fopen('php://memory', 'r+');
-        self::assertIsResource($stream);
-
-        return $stream;
-    }
-
-    /**
-     * @param resource $stream
-     */
-    private static function contents(mixed $stream): string
-    {
-        rewind($stream);
-
-        return (string) stream_get_contents($stream);
+        return new WorkCommand($app->createRequestScope(), $config, $output->output);
     }
 }

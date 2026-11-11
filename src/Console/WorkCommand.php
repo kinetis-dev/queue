@@ -8,6 +8,7 @@ use InvalidArgumentException;
 use Kinetis\Config\Config;
 use Kinetis\Console\Attributes\Command;
 use Kinetis\Console\CommandArguments;
+use Kinetis\Console\Output;
 use Kinetis\Container\RequestScope;
 use Kinetis\Queue\DisposableQueueInterface;
 use Kinetis\Queue\FailedJobRecorderInterface;
@@ -41,23 +42,13 @@ use Kinetis\Queue\QueueWorker;
  * why this is never registered on AppScope directly) to resolve the
  * queue binding and reach the booted application container QueueWorker
  * hands each job.
- *
- * $output/$errorOutput are injectable (defaulting to STDOUT/STDERR) for
- * testability against php://memory — the same pattern StatsCommand/
- * ClearCommand already use.
  */
 final readonly class WorkCommand
 {
-    /**
-     * @param resource $output mixed, not resource, since PHP has no native
-     *     "resource" type and a readonly property requires one
-     * @param resource $errorOutput
-     */
     public function __construct(
         private RequestScope $scope,
         private Config $config,
-        private mixed $output = STDOUT,
-        private mixed $errorOutput = STDERR,
+        private Output $output,
     ) {}
 
     #[Command(
@@ -96,18 +87,17 @@ final readonly class WorkCommand
         $failedJobs = $this->failedJobRecorder();
         $queue = $this->queue($connection);
 
-        fwrite($this->output, 'Queue worker started, listening on: ' . implode(', ', $queues) . "\n");
+        $this->output->line('Queue worker started, listening on: ' . implode(', ', $queues));
 
         if (!QueueWorker::supportsGracefulShutdown()) {
-            fwrite(
-                $this->errorOutput,
+            $this->output->error(
                 "Warning: ext-pcntl is not loaded, so SIGTERM cannot stop this worker between jobs. "
-                . "A deploy will interrupt whatever job is running. Install pcntl to avoid that.\n",
+                . "A deploy will interrupt whatever job is running. Install pcntl to avoid that.",
             );
         }
         new QueueWorker($this->scope->appScope(), $queue, $defaultMaxAttempts, $retryBaseDelaySeconds, $failedJobs, $connection)
             ->run($pollTimeoutSeconds, $queues);
-        fwrite($this->output, "Queue worker stopped.\n");
+        $this->output->line('Queue worker stopped.');
 
         return 0;
     }

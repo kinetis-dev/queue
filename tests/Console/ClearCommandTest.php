@@ -8,11 +8,12 @@ use Kinetis\Console\CommandArguments;
 use Kinetis\Queue\ClearableQueueInterface;
 use Kinetis\Queue\Console\ClearCommand;
 use Kinetis\Queue\Exception\InvalidQueueArgumentException;
+use Kinetis\Queue\QueueInterface;
+use Kinetis\Queue\Tests\Fixtures\CommandOutput;
 use Kinetis\Queue\Tests\Fixtures\InMemoryQueue;
 use Kinetis\Queue\Tests\Fixtures\NeverCalledQueue;
 use Kinetis\Queue\Tests\Fixtures\RecordingJob;
 use PHPUnit\Framework\TestCase;
-use ReflectionProperty;
 
 /**
  * The command holds a QueueInterface, so the capability check it makes
@@ -27,10 +28,11 @@ final class ClearCommandTest extends TestCase
         $queue = new InMemoryQueue();
         $queue->push(new RecordingJob('a'));
 
-        [$code, $output] = self::invoke(new ClearCommand($queue, self::stream()), []);
+        [$code, $output, $error] = self::invoke($queue, []);
 
         self::assertSame(1, $code);
-        self::assertStringContainsString('--force', $output);
+        self::assertSame('', $output);
+        self::assertSame("Refusing to clear default without --force.\nDiscarded jobs cannot be recovered.\n", $error);
         self::assertSame(1, $queue->size());
     }
 
@@ -40,9 +42,10 @@ final class ClearCommandTest extends TestCase
         $queue->push(new RecordingJob('a'));
         $queue->push(new RecordingJob('b'));
 
-        [$code, $output] = self::invoke(new ClearCommand($queue, self::stream()), ['--force']);
+        [$code, $output, $error] = self::invoke($queue, ['--force']);
 
         self::assertSame(0, $code);
+        self::assertSame('', $error);
         self::assertStringContainsString('Cleared 2 job(s)', $output);
         self::assertSame(0, $queue->size());
     }
@@ -53,9 +56,10 @@ final class ClearCommandTest extends TestCase
         $queue->push(new RecordingJob('a'), queue: 'high');
         $queue->push(new RecordingJob('b'), queue: 'default');
 
-        [$code, $output] = self::invoke(new ClearCommand($queue, self::stream()), ['--queue=high,default', '--force']);
+        [$code, $output, $error] = self::invoke($queue, ['--queue=high,default', '--force']);
 
         self::assertSame(0, $code);
+        self::assertSame('', $error);
         self::assertStringContainsString('Cleared 1 job(s) from "high"', $output);
         self::assertStringContainsString('Cleared 1 job(s) from "default"', $output);
         self::assertSame(0, $queue->size('high'));
@@ -67,9 +71,10 @@ final class ClearCommandTest extends TestCase
         // --force is supplied, so the refusal below can only come from
         // the capability check; NeverCalledQueue throws on every backend
         // operation, which is what proves no queue was touched first.
-        [$code, $output] = self::invoke(new ClearCommand(new NeverCalledQueue(), self::stream()), ['--force']);
+        [$code, $stdout, $output] = self::invoke(new NeverCalledQueue(), ['--force']);
 
         self::assertSame(1, $code);
+        self::assertSame('', $stdout);
         self::assertStringContainsString(NeverCalledQueue::class, $output);
         self::assertStringContainsString(ClearableQueueInterface::class, $output);
         self::assertStringContainsString('infrastructure tooling', $output);
@@ -90,7 +95,7 @@ final class ClearCommandTest extends TestCase
         $queue = new InMemoryQueue();
         $queue->push(new RecordingJob('a'), queue: 'high');
 
-        $command = new ClearCommand($queue, self::stream());
+        $command = new ClearCommand($queue, new CommandOutput()->output);
 
         try {
             $command->run(CommandArguments::parse(['--queue=high,not a name', '--force']));
@@ -111,7 +116,7 @@ final class ClearCommandTest extends TestCase
         $queue->push(new RecordingJob('a'), queue: 'high');
         $queue->push(new RecordingJob('b'), queue: 'default');
 
-        $command = new ClearCommand($queue, self::stream());
+        $command = new ClearCommand($queue, new CommandOutput()->output);
 
         try {
             $command->run(CommandArguments::parse(['--queue=high,default,high', '--force']));
@@ -132,7 +137,7 @@ final class ClearCommandTest extends TestCase
         $queue = new InMemoryQueue();
         $queue->push(new RecordingJob('a'), queue: 'high');
 
-        $command = new ClearCommand($queue, self::stream());
+        $command = new ClearCommand($queue, new CommandOutput()->output);
 
         try {
             $command->run(CommandArguments::parse(['--queue=high,not a name']));
@@ -162,28 +167,15 @@ final class ClearCommandTest extends TestCase
         return $queue->clear($name);
     }
 
-    /** @return resource */
-    private static function stream(): mixed
-    {
-        $stream = fopen('php://memory', 'r+');
-        self::assertIsResource($stream);
-
-        return $stream;
-    }
-
     /**
      * @param list<string> $argv
-     * @return array{int, string}
+     * @return array{int, string, string} exit code, stdout, stderr
      */
-    private static function invoke(ClearCommand $command, array $argv): array
+    private static function invoke(QueueInterface $queue, array $argv): array
     {
-        $output = (new ReflectionProperty($command, 'output'))->getValue($command);
-        self::assertIsResource($output);
+        $capture = new CommandOutput();
+        $code = new ClearCommand($queue, $capture->output)->run(CommandArguments::parse($argv));
 
-        $code = $command->run(CommandArguments::parse($argv));
-
-        rewind($output);
-
-        return [$code, (string) stream_get_contents($output)];
+        return [$code, $capture->takeStdout(), $capture->takeStderr()];
     }
 }

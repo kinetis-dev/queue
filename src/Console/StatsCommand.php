@@ -6,6 +6,7 @@ namespace Kinetis\Queue\Console;
 
 use Kinetis\Console\Attributes\Command;
 use Kinetis\Console\CommandArguments;
+use Kinetis\Console\Output;
 use Kinetis\Queue\QueueInterface;
 
 /**
@@ -20,10 +21,9 @@ use Kinetis\Queue\QueueInterface;
  */
 final readonly class StatsCommand
 {
-    /** @param resource $output */
     public function __construct(
         private QueueInterface $queue,
-        private mixed $output = \STDOUT,
+        private Output $output,
     ) {}
 
     #[Command('queue:stats', description: 'Show how many jobs are waiting. --queue=high,default selects which.')]
@@ -35,26 +35,21 @@ final readonly class StatsCommand
             : array_map('trim', explode(',', $queueOption));
 
         $width = max(array_map('strlen', [...$queues, 'QUEUE']));
-        $this->line(str_pad('QUEUE', $width) . '  WAITING');
+        $this->output->line(str_pad('QUEUE', $width) . '  WAITING');
 
         $total = 0;
 
         foreach ($queues as $queue) {
             $size = $this->queue->size($queue);
             $total += $size;
-            $this->line(str_pad($queue, $width) . '  ' . $size);
+            $this->output->line(str_pad($queue, $width) . '  ' . $size);
         }
 
         if (count($queues) > 1) {
-            $this->line(str_repeat('-', $width + 9));
-            $this->line(str_pad('total', $width) . '  ' . $total);
+            $this->output->line(str_repeat('-', $width + 9));
+            $this->output->line(str_pad('total', $width) . '  ' . $total);
         }
 
         return 0;
-    }
-
-    private function line(string $text): void
-    {
-        fwrite($this->output, $text . "\n");
     }
 }

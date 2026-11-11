@@ -6,6 +6,7 @@ namespace Kinetis\Queue\Console;
 
 use Kinetis\Console\Attributes\Command;
 use Kinetis\Console\CommandArguments;
+use Kinetis\Console\Output;
 use Kinetis\Queue\ClearableQueueInterface;
 use Kinetis\Queue\Exception\QueueNotClearableException;
 use Kinetis\Queue\QueueContract;
@@ -22,7 +23,7 @@ use Kinetis\Queue\QueueInterface;
  * Takes the bound QueueInterface, which does not carry clear(), so this
  * is where the capability is checked at runtime: a backend that does not
  * implement {@see ClearableQueueInterface} (Amazon SQS is the one
- * Kinetis ships) is named on stdout along with what to do instead, and
+ * Kinetis ships) is named on stderr along with what to do instead, and
  * the command exits 1 having touched no queue at all — the same wording
  * {@see QueueNotClearableException} carries for an application asking
  * the container for the capability. Application code names
@@ -37,10 +38,9 @@ use Kinetis\Queue\QueueInterface;
  */
 final readonly class ClearCommand
 {
-    /** @param resource $output */
     public function __construct(
         private QueueInterface $queue,
-        private mixed $output = \STDOUT,
+        private Output $output,
     ) {}
 
     #[Command('queue:clear', description: 'Discard waiting jobs: queue:clear --queue=default --force')]
@@ -49,7 +49,7 @@ final readonly class ClearCommand
         // Checked ahead of --force: on a backend that cannot clear at
         // all, "add --force" would be advice that never works.
         if (!$this->queue instanceof ClearableQueueInterface) {
-            $this->line(QueueNotClearableException::describe($this->queue));
+            $this->output->error(QueueNotClearableException::describe($this->queue));
 
             return 1;
         }
@@ -62,21 +62,16 @@ final readonly class ClearCommand
         QueueContract::assertValidQueueList($queues);
 
         if (!$arguments->hasOption('force')) {
-            $this->line('Refusing to clear ' . implode(', ', $queues) . ' without --force.');
-            $this->line('Discarded jobs cannot be recovered.');
+            $this->output->error('Refusing to clear ' . implode(', ', $queues) . ' without --force.');
+            $this->output->error('Discarded jobs cannot be recovered.');
 
             return 1;
         }
 
         foreach ($queues as $queue) {
-            $this->line("Cleared {$this->queue->clear($queue)} job(s) from \"{$queue}\".");
+            $this->output->line("Cleared {$this->queue->clear($queue)} job(s) from \"{$queue}\".");
         }
 
         return 0;
-    }
-
-    private function line(string $text): void
-    {
-        fwrite($this->output, $text . "\n");
     }
 }

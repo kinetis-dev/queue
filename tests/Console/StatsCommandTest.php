@@ -6,6 +6,7 @@ namespace Kinetis\Queue\Tests\Console;
 
 use Kinetis\Console\CommandArguments;
 use Kinetis\Queue\Console\StatsCommand;
+use Kinetis\Queue\Tests\Fixtures\CommandOutput;
 use Kinetis\Queue\Tests\Fixtures\InMemoryQueue;
 use Kinetis\Queue\Tests\Fixtures\RecordingJob;
 use PHPUnit\Framework\TestCase;
@@ -18,7 +19,7 @@ final class StatsCommandTest extends TestCase
         $queue->push(new RecordingJob('a'));
         $queue->push(new RecordingJob('b'));
 
-        [$code, $output] = self::invoke(new StatsCommand($queue, self::stream()), []);
+        [$code, $output] = self::invoke($queue, []);
 
         self::assertSame(0, $code);
         self::assertStringContainsString('default', $output);
@@ -32,7 +33,7 @@ final class StatsCommandTest extends TestCase
         $queue->push(new RecordingJob('b'), queue: 'high');
         $queue->push(new RecordingJob('c'), queue: 'default');
 
-        [$code, $output] = self::invoke(new StatsCommand($queue, self::stream()), ['--queue=high,default']);
+        [$code, $output] = self::invoke($queue, ['--queue=high,default']);
 
         self::assertSame(0, $code);
         self::assertMatchesRegularExpression('/high\s+2/', $output);
@@ -40,28 +41,17 @@ final class StatsCommandTest extends TestCase
         self::assertMatchesRegularExpression('/total\s+3/', $output);
     }
 
-    /** @return resource */
-    private static function stream(): mixed
-    {
-        $stream = fopen('php://memory', 'r+');
-        self::assertIsResource($stream);
-
-        return $stream;
-    }
-
     /**
      * @param list<string> $argv
      * @return array{int, string}
      */
-    private static function invoke(StatsCommand $command, array $argv): array
+    private static function invoke(InMemoryQueue $queue, array $argv): array
     {
-        $output = (new \ReflectionProperty($command, 'output'))->getValue($command);
-        self::assertIsResource($output);
+        $capture = new CommandOutput();
+        $code = new StatsCommand($queue, $capture->output)->run(CommandArguments::parse($argv));
 
-        $code = $command->run(CommandArguments::parse($argv));
+        self::assertSame('', $capture->takeStderr());
 
-        rewind($output);
-
-        return [$code, (string) stream_get_contents($output)];
+        return [$code, $capture->takeStdout()];
     }
 }
