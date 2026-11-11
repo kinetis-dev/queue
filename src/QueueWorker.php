@@ -103,7 +103,7 @@ use Throwable;
  * one — a container whose image declares a different STOPSIGNAL, as the
  * official PHP FPM images do — ends the process where it stands
  * instead. Which signal a deployment sends is the deployment's to
- * choose; see docs/queue.md.
+ * choose; see {@link https://kinetis.dev/docs/queue.html}.
  */
 final class QueueWorker
 {
