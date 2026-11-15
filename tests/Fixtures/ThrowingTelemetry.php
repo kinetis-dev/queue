@@ -167,6 +167,15 @@ final class ThrowingTelemetry implements TelemetryInterface
     #[\Override]
     public function resourceReadEnded(mixed $token): void {}
 
+    #[\Override]
+    public function inferenceStarted(string $system, string $model): mixed
+    {
+        return null;
+    }
+
+    #[\Override]
+    public function inferenceEnded(mixed $token, ?int $inputTokens, ?int $outputTokens, ?Throwable $failure): void {}
+
     public bool $throwOnJobPushStarted = false;
 
     #[\Override]
